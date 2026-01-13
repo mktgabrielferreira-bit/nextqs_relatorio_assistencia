@@ -14,6 +14,47 @@ from google.oauth2.service_account import Credentials
 # =============================
 st.set_page_config(page_title="📊 Relatório de Instalações NextQS", layout="wide")
 
+import streamlit as st
+
+def require_password():
+    # Se não tiver senha configurada, não bloqueia
+    if "app_password" not in st.secrets:
+        return True
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    # Tela de login (fora do sidebar)
+    st.markdown(
+        """
+        <div style="text-align:center; padding: 48px 0 16px 0;">
+            <h1 style="font-size: 44px; margin-bottom: 8px;">🔒 Acesso restrito</h1>
+            <p style="opacity:0.75; font-size: 18px;">Digite a senha para acessar o relatório</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    senha = st.text_input("Senha de acesso", type="password")
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("Entrar", use_container_width=True):
+            if senha == st.secrets["app_password"]:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Senha incorreta.")
+
+    st.stop()
+
+# Chame isso antes de QUALQUER coisa do relatório
+require_password()
+
+
 SCOPES_READONLY = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 # Ajuste aqui se os nomes das colunas na planilha forem diferentes
