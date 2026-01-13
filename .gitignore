@@ -1,0 +1,14 @@
+# Secrets (NUNCA subir)
+.streamlit/secrets.toml
+
+# Ambientes virtuais
+venv/
+.venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+Thumbs.db
