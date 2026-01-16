@@ -78,6 +78,7 @@ COL_STATUS = "Status"
 COL_CIDADE = "Cidade"
 COL_QT_QUIOSQUE = "Quantidade Quiosque"
 COL_QT_PLAYERS = "Quantidade Players"
+COL_PLANO = "Plano"
 
 
 
@@ -193,6 +194,40 @@ def mode_value(series: pd.Series) -> str:
     if s.empty:
         return "—"
     return s.value_counts().index[0]
+
+
+def cliente_base(nome: object) -> str:
+    """Normaliza nome do cliente removendo sufixos numéricos.
+
+    Exemplos:
+      - "Mercantil 01" -> "Mercantil"
+      - "Mercantil-2"  -> "Mercantil"
+      - "Cliente #12"  -> "Cliente"
+    """
+    if nome is None or (isinstance(nome, float) and pd.isna(nome)):
+        return ""
+    s = str(nome).strip()
+    if not s:
+        return ""
+    # remove sufixos numéricos no final (com separadores comuns)
+    s = re.sub(r"\s*(?:[-#]|nº|no\.?|num\.?|\.)?\s*\d+\s*$", "", s, flags=re.IGNORECASE)
+    # remove espaços duplos
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
+
+
+def month_label_pt(ym: str) -> str:
+    """Converte 'YYYY-MM' em rótulo pt-br curto (ex.: '2026-01' -> 'jan/2026')."""
+    meses = [
+        "jan", "fev", "mar", "abr", "mai", "jun",
+        "jul", "ago", "set", "out", "nov", "dez",
+    ]
+    try:
+        y, m = ym.split("-")
+        mi = int(m)
+        return f"{meses[mi-1]}/{y}"
+    except Exception:
+        return ym
 
 
 def kpi_card(label: str, value: str) -> None:
@@ -454,11 +489,8 @@ if not SPREADSHEET_ID:
 
 with st.sidebar:
     st.header("Filtros")
-    sheet_name = st.text_input(
-        "Nome da aba (worksheet)",
-        value=SHEET_NAME_DEFAULT,
-        help="Ex.: 2026. Se estiver vazio/errado, o app usa a primeira aba.",
-    ).strip()
+    # Aba/worksheet vem dos secrets (evita expor campo para não confundir o usuário)
+    sheet_name = (SHEET_NAME_DEFAULT or "").strip()
 
 # Sempre relê a planilha (sincronismo a cada alteração de filtro)
 df_raw = read_sheet(SPREADSHEET_ID, sheet_name)
@@ -483,10 +515,45 @@ ref_month = int(ref_dt.month)
 with st.sidebar:
     period_option = st.radio(
         "Período",
-        options=["Este mês", "Este ano"],
+        options=["Este mês", "Este ano", "Personalizado"],
         index=0,  # padrão: Este mês
         label_visibility="visible",
     )
+
+    # Se Personalizado: escolhe ano/mês disponíveis na planilha
+    sel_custom_year = None
+    sel_custom_month = None
+    if period_option == "Personalizado":
+        if has_valid_dates:
+            _dates_all = df["_data"].dropna()
+            if _dates_all.empty:
+                st.info("Sem datas válidas para filtro personalizado.")
+            else:
+                years = sorted(_dates_all.dt.year.unique().tolist())
+                year_default = ref_year if ref_year in years else years[-1]
+                sel_custom_year = st.selectbox("Ano", options=years, index=years.index(year_default))
+
+                months_avail = (
+                    _dates_all[_dates_all.dt.year == sel_custom_year]
+                    .dt.month
+                    .unique()
+                    .tolist()
+                )
+                months_avail = sorted([int(m) for m in months_avail])
+                month_names = [
+                    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+                    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+                ]
+                month_options = [f"{m:02d} - {month_names[m-1]}" for m in months_avail]
+                # tenta manter o mês de referência
+                m_default = ref_month if ref_month in months_avail else months_avail[-1]
+                sel_custom_month = st.selectbox(
+                    "Mês",
+                    options=month_options,
+                    index=months_avail.index(m_default),
+                )
+        else:
+            st.info("Sem coluna de data válida para filtro personalizado.")
 
     # filtros avançados (mantidos)
     with st.expander("Filtros avançados", expanded=False):
@@ -501,7 +568,17 @@ with st.sidebar:
         sel_modalidade = multiselect_filter("Modalidade", COL_MODALIDADE)
         sel_uf = multiselect_filter("UF", COL_UF)
         sel_cidade = multiselect_filter("Cidade", COL_CIDADE)
-        sel_cliente = multiselect_filter("Cliente", COL_CLIENTE)
+        # Cliente (considera nomes com numeração como o mesmo cliente)
+        if safe_col(df, COL_CLIENTE):
+            df["_cliente_base"] = df[COL_CLIENTE].map(cliente_base)
+            cliente_opts = sorted([c for c in df["_cliente_base"].dropna().astype(str).unique().tolist() if c.strip()])
+            sel_cliente = st.multiselect("Cliente", options=cliente_opts)
+        else:
+            sel_cliente = []
+            st.caption(f"Coluna ausente: {COL_CLIENTE}")
+
+        # Plano
+        sel_plano = multiselect_filter("Plano", COL_PLANO)
 
         tecnico_col = first_existing_col(df, [COL_TECNICO, "Tecnico", "Técnicos", "Tecnicos"])
         consultor_col = first_existing_col(df, [COL_CONSULTOR, "Consultores", "Consultor(a)"])
@@ -533,9 +610,22 @@ if has_valid_dates:
     if period_option == "Este mês":
         start_date = date(ref_year, ref_month, 1)
         end_date = ref_dt.date()
-    else:  # Este ano
+    elif period_option == "Este ano":
         start_date = date(ref_year, 1, 1)
         end_date = ref_dt.date()
+    else:  # Personalizado
+        if sel_custom_year is None or sel_custom_month is None:
+            start_date = date(ref_year, ref_month, 1)
+            end_date = ref_dt.date()
+        else:
+            # sel_custom_month vem como "MM - nome"
+            try:
+                m = int(str(sel_custom_month).split("-")[0].strip())
+            except Exception:
+                m = ref_month
+            start_date = date(int(sel_custom_year), m, 1)
+            # fim do mês (via pandas, evitando calendar)
+            end_date = (pd.Timestamp(start_date) + pd.offsets.MonthEnd(0)).date()
 
     df_f = df_f[(df_f["_data"].dt.date >= start_date) & (df_f["_data"].dt.date <= end_date)]
 
@@ -549,7 +639,14 @@ def apply_multiselect(df_in: pd.DataFrame, col: str, selected: list[str]) -> pd.
 df_f = apply_multiselect(df_f, COL_MODALIDADE, sel_modalidade if "sel_modalidade" in locals() else [])
 df_f = apply_multiselect(df_f, COL_UF, sel_uf if "sel_uf" in locals() else [])
 df_f = apply_multiselect(df_f, COL_CIDADE, sel_cidade if "sel_cidade" in locals() else [])
-df_f = apply_multiselect(df_f, COL_CLIENTE, sel_cliente if "sel_cliente" in locals() else [])
+
+# Cliente (filtra pelo nome-base)
+if "sel_cliente" in locals() and sel_cliente and safe_col(df_f, COL_CLIENTE):
+    df_f["_cliente_base"] = df_f[COL_CLIENTE].map(cliente_base)
+    df_f = df_f[df_f["_cliente_base"].astype(str).isin([str(x) for x in sel_cliente])]
+
+# Plano
+df_f = apply_multiselect(df_f, COL_PLANO, sel_plano if "sel_plano" in locals() else [])
 
 if "tecnico_col" in locals() and tecnico_col:
     df_f = apply_multiselect(df_f, tecnico_col, sel_tecnico if "sel_tecnico" in locals() else [])
@@ -602,6 +699,9 @@ if has_valid_dates and df_f["_data"].notna().any():
         counts = months.astype(str).value_counts().sort_values(ascending=False)
         dfm = counts.rename_axis("Mês").reset_index(name="Instalações")
 
+        # Rótulos em português e força exibição de todos os meses no eixo X
+        dfm["Mês (rótulo)"] = dfm["Mês"].map(month_label_pt)
+
         fig = px.bar(
             dfm,
             x="Mês",
@@ -617,7 +717,12 @@ if has_valid_dates and df_f["_data"].notna().any():
             xaxis_title="",
             yaxis_title="Instalações",
         )
-        fig.update_xaxes(tickangle=-35)
+        fig.update_xaxes(
+            tickangle=-35,
+            tickmode="array",
+            tickvals=dfm["Mês"].tolist(),
+            ticktext=dfm["Mês (rótulo)"].tolist(),
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 # =============================
@@ -694,6 +799,58 @@ with c_right:
         histogram_by_hour(df_f[hora_col], y_label="Instalações")
     else:
         st.info("Coluna de horário inicial não encontrada (ex.: 'Hora inicio').")
+
+# =============================
+# Clientes (contagem) + Motivo de Reagendamento (lado a lado)
+# =============================
+cl_left, cl_right = st.columns(2)
+
+with cl_left:
+    st.subheader("Clientes e quantidade de Instalações")
+    if safe_col(df_f, COL_CLIENTE):
+        tmp = df_f.copy()
+        tmp["_cliente_base"] = tmp[COL_CLIENTE].map(cliente_base)
+        cliente_counts = (
+            tmp["_cliente_base"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        cliente_counts = cliente_counts[cliente_counts != ""]
+
+        if cliente_counts.empty:
+            st.info("Sem dados de cliente para listar.")
+        else:
+            df_clientes = (
+                cliente_counts.value_counts()
+                .rename_axis("Cliente")
+                .reset_index(name="Instalações")
+            )
+            st.dataframe(df_clientes, use_container_width=True, height=360)
+    else:
+        st.info("Coluna 'Cliente' não encontrada.")
+
+with cl_right:
+    st.subheader("Motivo de Reagendamento")
+    motivo_col = first_existing_col(
+        df_f,
+        [
+            "Motivo reagendamento",
+            "Motivo Reagendamento",
+            "Motivo do reagendamento",
+            "Motivo do Reagendamento",
+            "Motivo",
+        ],
+    )
+    if motivo_col:
+        s_motivo = df_f[motivo_col].dropna().astype(str).str.strip()
+        s_motivo = s_motivo[s_motivo != ""]
+        if s_motivo.empty:
+            st.info("Sem motivos preenchidos.")
+        else:
+            bar_chart_counts(s_motivo, top_n=25, y_label="Ocorrências")
+    else:
+        st.info("Coluna de motivo de reagendamento não encontrada.")
 
 # =============================
 # Instalações por Estado (Pizza)
