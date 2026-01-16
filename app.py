@@ -65,9 +65,9 @@ require_password()
 SCOPES_READONLY = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 # Ajuste aqui se os nomes das colunas na planilha forem diferentes
-COL_DATA = "Data agendada"
-COL_HORA_INICIO = "Hora inicio"
-COL_HORA_FIM = "Hora fim"
+COL_DATA = "Data"
+COL_HORA_INICIO = "Início"
+COL_HORA_FIM = "Término"
 COL_DURACAO = "Duração"  # usado no "Tempo Médio"
 COL_MODALIDADE = "Modalidade"
 COL_TECNICO = "Técnico"  # ranking de técnicos (fallbacks abaixo)
