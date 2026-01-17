@@ -457,6 +457,11 @@ def get_reagendamento_rate(df: pd.DataFrame) -> Optional[float]:
 def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
     """
     Lê dados do Google Sheets via Service Account (st.secrets["google_service_account"]).
+
+    Importante: usamos get_all_values() para NÃO perder linhas após linhas em branco.
+    (get_all_records() pode ignorar linhas vazias e, dependendo da estrutura da planilha,
+    acabar não trazendo linhas depois de "buracos".)
+
     Observação: SEM CACHE para garantir sincronismo a cada mudança de filtro (Streamlit rerun).
     """
     creds = Credentials.from_service_account_info(
@@ -471,8 +476,26 @@ def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
     except Exception:
         ws = sh.sheet1
 
-    records = ws.get_all_records()
-    return pd.DataFrame(records)
+    values = ws.get_all_values()  # inclui linhas vazias no meio
+    if not values or len(values) < 2:
+        return pd.DataFrame()
+
+    headers = [h.strip() for h in values[0]]
+    # Remove cabeçalhos vazios no fim (caso exista coluna extra sem nome)
+    while headers and headers[-1] == "":
+        headers.pop()
+
+    rows = values[1:]
+    norm_rows = []
+    n = len(headers)
+    for r in rows:
+        r = r[:n] + [""] * max(0, n - len(r))
+        # Mantém a leitura passando por linhas totalmente vazias, mas não as inclui no DF
+        if all(str(x).strip() == "" for x in r):
+            continue
+        norm_rows.append(r)
+
+    return pd.DataFrame(norm_rows, columns=headers)
 
 
 # =============================
@@ -613,27 +636,29 @@ with st.sidebar:
 df_f = df.copy()
 
 if has_valid_dates:
+    # Para "Este mês" e "Este ano" queremos considerar o período inteiro
+    # (incluindo datas futuras já agendadas), então filtramos por mês/ano.
     if period_option == "Este mês":
-        start_date = date(today_date.year, today_date.month, 1)
-        end_date = today_date
+        y = int(today_date.year)
+        m = int(today_date.month)
+        df_f = df_f[(df_f["_data"].dt.year == y) & (df_f["_data"].dt.month == m)]
+
     elif period_option == "Este ano":
-        start_date = date(today_date.year, 1, 1)
-        end_date = today_date
-    else:  # Personalizado
+        y = int(today_date.year)
+        df_f = df_f[df_f["_data"].dt.year == y]
+
+    else:  # Personalizado (mês fechado)
         if sel_custom_year is None or sel_custom_month is None:
-            start_date = date(today_date.year, today_date.month, 1)
-            end_date = today_date
+            y = int(today_date.year)
+            m = int(today_date.month)
+            df_f = df_f[(df_f["_data"].dt.year == y) & (df_f["_data"].dt.month == m)]
         else:
-            # sel_custom_month vem como "MM - nome"
             try:
                 m = int(str(sel_custom_month).split("-")[0].strip())
             except Exception:
                 m = data_ref_month
-            start_date = date(int(sel_custom_year), m, 1)
-            # fim do mês (via pandas, evitando calendar)
-            end_date = (pd.Timestamp(start_date) + pd.offsets.MonthEnd(0)).date()
-
-    df_f = df_f[(df_f["_data"].dt.date >= start_date) & (df_f["_data"].dt.date <= end_date)]
+            y = int(sel_custom_year)
+            df_f = df_f[(df_f["_data"].dt.year == y) & (df_f["_data"].dt.month == int(m))]
 
 
 def apply_multiselect(df_in: pd.DataFrame, col: str, selected: list[str]) -> pd.DataFrame:
