@@ -504,10 +504,16 @@ df = df_raw.copy()
 # Normalização de data
 df["_data"] = to_date_series(df[COL_DATA]) if safe_col(df, COL_DATA) else pd.NaT
 has_valid_dates = df["_data"].notna().any()
-ref_dt = df["_data"].dropna().max() if has_valid_dates else pd.Timestamp.today()
+# Referências de data
+# - today_*: usado para filtros 'Este mês' e 'Este ano' (calendário real)
+# - data_ref_*: usado apenas para escolher defaults do filtro 'Personalizado'
+today_ts = pd.Timestamp.today()
+today_date = today_ts.date()
 
-ref_year = int(ref_dt.year)
-ref_month = int(ref_dt.month)
+data_ref_dt = df["_data"].dropna().max() if has_valid_dates else today_ts
+
+data_ref_year = int(data_ref_dt.year)
+data_ref_month = int(data_ref_dt.month)
 
 # =============================
 # Sidebar: filtros principais (radio)
@@ -530,7 +536,7 @@ with st.sidebar:
                 st.info("Sem datas válidas para filtro personalizado.")
             else:
                 years = sorted(_dates_all.dt.year.unique().tolist())
-                year_default = ref_year if ref_year in years else years[-1]
+                year_default = data_ref_year if data_ref_year in years else years[-1]
                 sel_custom_year = st.selectbox("Ano", options=years, index=years.index(year_default))
 
                 months_avail = (
@@ -546,7 +552,7 @@ with st.sidebar:
                 ]
                 month_options = [f"{m:02d} - {month_names[m-1]}" for m in months_avail]
                 # tenta manter o mês de referência
-                m_default = ref_month if ref_month in months_avail else months_avail[-1]
+                m_default = data_ref_month if data_ref_month in months_avail else months_avail[-1]
                 sel_custom_month = st.selectbox(
                     "Mês",
                     options=month_options,
@@ -608,21 +614,21 @@ df_f = df.copy()
 
 if has_valid_dates:
     if period_option == "Este mês":
-        start_date = date(ref_year, ref_month, 1)
-        end_date = ref_dt.date()
+        start_date = date(today_date.year, today_date.month, 1)
+        end_date = today_date
     elif period_option == "Este ano":
-        start_date = date(ref_year, 1, 1)
-        end_date = ref_dt.date()
+        start_date = date(today_date.year, 1, 1)
+        end_date = today_date
     else:  # Personalizado
         if sel_custom_year is None or sel_custom_month is None:
-            start_date = date(ref_year, ref_month, 1)
-            end_date = ref_dt.date()
+            start_date = date(today_date.year, today_date.month, 1)
+            end_date = today_date
         else:
             # sel_custom_month vem como "MM - nome"
             try:
                 m = int(str(sel_custom_month).split("-")[0].strip())
             except Exception:
-                m = ref_month
+                m = data_ref_month
             start_date = date(int(sel_custom_year), m, 1)
             # fim do mês (via pandas, evitando calendar)
             end_date = (pd.Timestamp(start_date) + pd.offsets.MonthEnd(0)).date()
