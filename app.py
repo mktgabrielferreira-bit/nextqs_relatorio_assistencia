@@ -10,10 +10,45 @@ from google.oauth2.service_account import Credentials
 
 
 # =============================
+# Paleta de cores personalizada
+# =============================
+COR1 = "#1896D8"  # destaques
+COR2 = "#CC1B63"  # alerta (>= 26% reagend.)
+COR3 = "#342B38"  # (não usado agora)
+
+# =============================
 # Config
 # =============================
 st.set_page_config(page_title="📊 Relatório de Instalações NextQS", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    /* Fundo com marca d'água */
+    .stApp {
+        background-image: url("assets/nextqs-fundo.png");
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: 45%;
+        background-attachment: fixed;
+        background-color: #0e1117;
+    }
+
+    /* Ajuste de transparência simulada */
+    .stApp::before {
+        content: "";
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(14, 17, 23, 0.85);
+        z-index: -1;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 
 def require_password() -> None:
@@ -230,7 +265,7 @@ def month_label_pt(ym: str) -> str:
         return ym
 
 
-def kpi_card(label: str, value: str) -> None:
+def kpi_card(label: str, value: str, color: str = COR1) -> None:
     st.markdown(
         f"""
         <div style="
@@ -240,7 +275,7 @@ def kpi_card(label: str, value: str) -> None:
             border: 1px solid rgba(255,255,255,0.06);
             ">
             <div style="font-size: 14px; opacity: 0.85;">{label}</div>
-            <div style="font-size: 34px; font-weight: 800; color: #2ecc71; line-height: 1.1;">{value}</div>
+            <div style="font-size: 34px; font-weight: 800; color: {color}; line-height: 1.1;">{value}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -699,15 +734,16 @@ modalidade_mais_comum = mode_value(df_f[COL_MODALIDADE]) if safe_col(df_f, COL_M
 reag_rate = get_reagendamento_rate(df_f)
 taxa_reag = f"{reag_rate*100:.1f}%" if reag_rate is not None else "—"
 
+taxa_reag_color = COR2 if (reag_rate is not None and reag_rate >= 0.26) else COR1
 k1, k2, k3, k4 = st.columns(4)
 with k1:
-    kpi_card("Total de Instalações", f"{total_instalacoes}")
+    kpi_card("Total de Instalações", f"{total_instalacoes}", color=COR1)
 with k2:
-    kpi_card("Tempo Médio", tempo_medio_str)
+    kpi_card("Tempo Médio", tempo_medio_str, color=COR1)
 with k3:
-    kpi_card("Modalidade mais comum", modalidade_mais_comum)
+    kpi_card("Modalidade mais comum", modalidade_mais_comum, color=COR1)
 with k4:
-    kpi_card("Taxa de Reagendamentos", taxa_reag)
+    kpi_card("Taxa de Reagendamentos", taxa_reag, color=taxa_reag_color)
 
 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
