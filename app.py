@@ -182,6 +182,36 @@ def _parse_duration_to_minutes(value) -> Optional[float]:
 
 
 
+
+def parse_brl_money(value) -> Optional[float]:
+    """Converte valores monetários BRL para float.
+
+    Aceita tanto:
+      - números (ex.: 500)
+      - strings formatadas (ex.: 'R$ 500,00', '1.234,56')
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+
+    # Já numérico
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return float(value)
+
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return None
+
+    # Remove símbolos e espaços (inclui NBSP do Sheets)
+    s = s.replace("\u00A0", " ").replace(" ", "")
+    s = s.replace("R$", "").replace("r$", "")
+    # Remove separador de milhar e ajusta decimal pt-BR
+    s = s.replace(".", "").replace(",", ".")
+    v = pd.to_numeric(s, errors="coerce")
+    if pd.isna(v):
+        return None
+    return float(v)
+
+
 def format_number_pt(value: Optional[float], decimals: int = 1) -> str:
     """Formata número no padrão pt-BR (1.234,5)."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -557,6 +587,9 @@ if df_raw.empty:
 
 df = df_raw.copy()
 
+# Normaliza nomes de colunas (evita espaços invisíveis no cabeçalho)
+df.columns = df.columns.str.strip()
+
 # Normalização de data
 df["_data"] = to_date_series(df[COL_DATA]) if safe_col(df, COL_DATA) else pd.NaT
 has_valid_dates = df["_data"].notna().any()
@@ -747,7 +780,9 @@ with k4:
 # --- Novos destaques ---
 faturamento_total = 0.0
 if safe_col(df_f, COL_VALOR_INST):
-    faturamento_total = float(pd.to_numeric(df_f[COL_VALOR_INST], errors="coerce").fillna(0).sum())
+    valores = df_f[COL_VALOR_INST].map(parse_brl_money).dropna()
+    faturamento_total = float(valores.sum()) if not valores.empty else 0.0
+
 
 total_minutes_sum = 0.0
 if safe_col(df_f, COL_DURACAO):
