@@ -76,6 +76,7 @@ COL_DATA = "Data"
 COL_HORA_INICIO = "Início"
 COL_HORA_FIM = "Término"
 COL_DURACAO = "Duração"  # usado no "Tempo Médio"
+COL_VALOR_INST = "Valor da instalação"
 COL_MODALIDADE = "Modalidade"
 COL_TECNICO = "Técnico"  # ranking de técnicos (fallbacks abaixo)
 COL_CONSULTOR = "Consultor"
@@ -178,6 +179,32 @@ def _parse_duration_to_minutes(value) -> Optional[float]:
     if mn:
         return float(mn.group(1).replace(",", "."))
     return None
+
+
+
+def format_number_pt(value: Optional[float], decimals: int = 1) -> str:
+    """Formata número no padrão pt-BR (1.234,5)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        v = float(value)
+    except Exception:
+        return "—"
+    s = f"{v:,.{decimals}f}"
+    # Python usa ',' para milhar e '.' para decimal. Troca para pt-BR.
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_currency_brl(value: Optional[float]) -> str:
+    """Formata moeda em BRL (R$ 1.234,56)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        v = float(value)
+    except Exception:
+        return "—"
+    s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
 
 
 def format_minutes_pt(minutes: Optional[float]) -> str:
@@ -511,7 +538,7 @@ def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
 st.title("📊 Relatório de Instalações NextQS")
 
 SPREADSHEET_ID = st.secrets.get("spreadsheet_id", "")
-SHEET_NAME_DEFAULT = st.secrets.get("sheet_name", "2026")
+SHEET_NAME = "Instalacoes_2026"
 
 if not SPREADSHEET_ID:
     st.error("Faltou configurar `spreadsheet_id` nos secrets.")
@@ -519,11 +546,10 @@ if not SPREADSHEET_ID:
 
 with st.sidebar:
     st.header("Filtros")
-    # Aba/worksheet vem dos secrets (evita expor campo para não confundir o usuário)
-    sheet_name = (SHEET_NAME_DEFAULT or "").strip()
+    st.caption("Aba: Instalacoes_2026")
 
 # Sempre relê a planilha (sincronismo a cada alteração de filtro)
-df_raw = read_sheet(SPREADSHEET_ID, sheet_name)
+df_raw = read_sheet(SPREADSHEET_ID, SHEET_NAME)
 
 if df_raw.empty:
     st.warning("A planilha não retornou dados.")
@@ -716,6 +742,39 @@ with k3:
     kpi_card("Modalidade mais comum", modalidade_mais_comum, color=COR1)
 with k4:
     kpi_card("Taxa de Reagendamentos", taxa_reag, color=taxa_reag_color)
+
+
+# --- Novos destaques ---
+faturamento_total = 0.0
+if safe_col(df_f, COL_VALOR_INST):
+    faturamento_total = float(pd.to_numeric(df_f[COL_VALOR_INST], errors="coerce").fillna(0).sum())
+
+total_minutes_sum = 0.0
+if safe_col(df_f, COL_DURACAO):
+    mins_all = df_f[COL_DURACAO].map(_parse_duration_to_minutes).dropna()
+    total_minutes_sum = float(mins_all.sum()) if not mins_all.empty else 0.0
+
+horas_totais = total_minutes_sum / 60.0 if total_minutes_sum else 0.0
+valor_por_hora = (faturamento_total / horas_totais) if horas_totais > 0 else None
+
+cliente_mais_instalacoes = "—"
+if safe_col(df_f, COL_CLIENTE):
+    tmpc = df_f[COL_CLIENTE].map(cliente_base)
+    tmpc = tmpc.dropna().astype(str).str.strip()
+    tmpc = tmpc[tmpc != ""]
+    if not tmpc.empty:
+        cliente_mais_instalacoes = tmpc.value_counts().index[0]
+
+k5, k6, k7, k8 = st.columns(4)
+with k5:
+    kpi_card("Faturamento Total", format_currency_brl(faturamento_total), color=COR1)
+with k6:
+    kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", color=COR1)
+with k7:
+    kpi_card("Valor por Hora", format_currency_brl(valor_por_hora) if valor_por_hora is not None else "—", color=COR1)
+with k8:
+    kpi_card("Cliente com mais instalações", cliente_mais_instalacoes, color=COR1)
+
 
 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
