@@ -568,7 +568,7 @@ def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
 st.title("📊 Relatório de Instalações NextQS")
 
 SPREADSHEET_ID = st.secrets.get("spreadsheet_id", "")
-SHEET_NAME = "Instalacoes_2026"
+SHEET_NAME = None  # definido pelo seletor de dashboard
 
 if not SPREADSHEET_ID:
     st.error("Faltou configurar `spreadsheet_id` nos secrets.")
@@ -576,7 +576,23 @@ if not SPREADSHEET_ID:
 
 with st.sidebar:
     st.header("Filtros")
-    st.caption("Aba: Instalacoes_2026")
+
+    # Seletor de dashboard (cada opção aponta para uma aba da planilha)
+    DASHBOARDS = {
+        "Instalações": "Instalacoes_2026",
+        # Adicione outros dashboards aqui, por exemplo:
+        # "Reagendamentos": "Reagendamentos_2026",
+        # "Financeiro": "Financeiro_2026",
+    }
+
+    selected_dashboard = st.radio(
+        "Dashboard",
+        options=list(DASHBOARDS.keys()),
+        index=0,
+        label_visibility="collapsed",
+    )
+
+    SHEET_NAME = DASHBOARDS[selected_dashboard]
 
 # Sempre relê a planilha (sincronismo a cada alteração de filtro)
 df_raw = read_sheet(SPREADSHEET_ID, SHEET_NAME)
@@ -776,6 +792,9 @@ with k3:
 with k4:
     kpi_card("Taxa de Reagendamentos", taxa_reag, color=taxa_reag_color)
 
+
+# Espaço entre a primeira e a segunda linha de KPIs
+st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
 # --- Novos destaques ---
 faturamento_total = 0.0
