@@ -677,28 +677,51 @@ with st.sidebar:
 # =============================
 # Tela: Cadastro de Instalação
 # =============================
-def _is_valid_time_hhmm(s: str) -> bool:
-    s = (s or "").strip()
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
-    if not m:
-        return False
-    h = int(m.group(1))
-    mi = int(m.group(2))
-    return 0 <= h <= 23 and 0 <= mi <= 59
-
-
-
 from datetime import datetime, timedelta
 
+
+def _digits_only(x: str) -> str:
+    return re.sub(r"\D", "", x or "")
+
+
+def _mask_date_ddmmyyyy(x: str) -> str:
+    """Usuário digita só números (ex: 06022026) e o campo vira 06/02/2026."""
+    d = _digits_only(x)[:8]
+    if len(d) <= 2:
+        return d
+    if len(d) <= 4:
+        return f"{d[:2]}/{d[2:4]}"
+    return f"{d[:2]}/{d[2:4]}/{d[4:8]}"
+
+
+def _mask_time_hhmm(x: str) -> str:
+    """Usuário digita só números (ex: 1000) e o campo vira 10:00."""
+    d = _digits_only(x)[:4]
+    if len(d) <= 2:
+        return d
+    return f"{d[:2]}:{d[2:4]}"
+
+
 def _parse_date_ddmmyyyy(s: str):
+    """Aceita dd/mm/aaaa OU 8 dígitos (ddmmaaaa)."""
     s = (s or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d{8}", s):
+        s = _mask_date_ddmmyyyy(s)
     try:
         return datetime.strptime(s, "%d/%m/%Y").date()
     except Exception:
         return None
 
+
 def _parse_time_hhmm(s: str):
+    """Aceita HH:MM OU 4 dígitos (hhmm)."""
     s = (s or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d{4}", s):
+        s = _mask_time_hhmm(s)
     if not re.fullmatch(r"\d{2}:\d{2}", s):
         return None
     try:
@@ -706,8 +729,9 @@ def _parse_time_hhmm(s: str):
     except Exception:
         return None
 
+
 def _duration_hhmm(start_hhmm: str, end_hhmm: str) -> str:
-    """Calcula duração HH:MM a partir de 'HH:MM' e 'HH:MM'. Erro se término < início."""
+    """Calcula duração HH:MM. Erro se término < início."""
     t1 = _parse_time_hhmm(start_hhmm)
     t2 = _parse_time_hhmm(end_hhmm)
     if not t1 or not t2:
@@ -722,20 +746,30 @@ def _duration_hhmm(start_hhmm: str, end_hhmm: str) -> str:
     m = total_minutes % 60
     return f"{h:02d}:{m:02d}"
 
+
 def _parse_brl_number_str(s: str):
     # Aceita números com vírgula; converte usando helper existente
     return parse_brl_money(s)
-
 
 if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
     st.title("📝 Cadastrar Instalação")
     st.caption(f"Aba de destino: **{SHEET_NAME}**")
 
+    # Máscara simples via on_change (fora de st.form, então é permitido)
+    def _on_data_change():
+        st.session_state.data_txt = _mask_date_ddmmyyyy(st.session_state.get("data_txt", ""))
+
+    def _on_inicio_change():
+        st.session_state.inicio_txt = _mask_time_hhmm(st.session_state.get("inicio_txt", ""))
+
+    def _on_termino_change():
+        st.session_state.termino_txt = _mask_time_hhmm(st.session_state.get("termino_txt", ""))
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", max_chars=10)
-        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", max_chars=5)
-        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", max_chars=5)
+        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", max_chars=10, on_change=_on_data_change)
+        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", max_chars=5, on_change=_on_inicio_change)
+        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", max_chars=5, on_change=_on_termino_change)
 
     with c2:
         modalidade = st.selectbox(
@@ -746,9 +780,10 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
             "Consultor",
             ["Shimada", "André", "Jefferson", "Sandro", "Renato"],
         )
-        tecnico = st.selectbox(
-            "Técnico",
+        tecnicos_sel = st.multiselect(
+            "Técnico(s)",
             ["Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"],
+            default=[],
         )
 
     with c3:
@@ -786,7 +821,8 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
     with c7:
         plano = st.selectbox(
             "Plano",
-            ["TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"],
+            ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"],
+            index=0,
         )
 
     with c8:
@@ -862,7 +898,7 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
                 "Quantidade Players": int(players_qtd),
                 "UF": uf_clean,
                 "Cidade": cidade_txt.strip(),
-                "Técnico": tecnico,
+                "Técnico": ", ".join(tecnicos_sel) if tecnicos_sel else "",
                 "Status": status,
                 "CV": cv_txt.strip(),
                 "Plano": plano,
