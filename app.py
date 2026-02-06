@@ -71,6 +71,50 @@ require_password()
 
 SCOPES_READONLY = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
+# Leitura + escrita (para cadastro de instalações)
+SCOPES_READWRITE = ["https://www.googleapis.com/auth/spreadsheets"]
+
+def _get_gspread_client(scopes: list[str]):
+    """Cria cliente gspread usando Service Account (st.secrets["google_service_account"])."""
+    creds = Credentials.from_service_account_info(
+        st.secrets["google_service_account"],
+        scopes=scopes,
+    )
+    return gspread.authorize(creds)
+
+
+def append_row_to_sheet(
+    spreadsheet_id: str,
+    sheet_name: Optional[str],
+    values_by_header: dict[str, object],
+) -> None:
+    """Insere uma nova linha no Google Sheets, respeitando a ordem do cabeçalho existente.
+
+    - Lê a 1ª linha (headers) da aba
+    - Monta a linha nova na mesma ordem
+    - Preenche vazio para colunas não informadas
+    """
+    gc = _get_gspread_client(SCOPES_READWRITE)
+    sh = gc.open_by_key(spreadsheet_id)
+
+    try:
+        ws = sh.worksheet(sheet_name) if sheet_name else sh.sheet1
+    except Exception:
+        ws = sh.sheet1
+
+    headers = [h.strip() for h in ws.row_values(1)]
+    if not headers:
+        raise RuntimeError("A aba não possui cabeçalho na primeira linha.")
+
+    row = []
+    for h in headers:
+        # Mantém compatibilidade com headers com espaços invisíveis
+        key = h.strip()
+        v = values_by_header.get(key, "")
+        row.append("" if v is None else str(v))
+
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
 # Ajuste aqui se os nomes das colunas na planilha forem diferentes
 COL_DATA = "Data"
 COL_HORA_INICIO = "Início"
@@ -575,6 +619,21 @@ if not SPREADSHEET_ID:
     st.stop()
 
 with st.sidebar:
+    # Navegação (botões)
+    if "view_mode" not in st.session_state:
+        st.session_state.view_mode = "RELATÓRIO"
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("RELATÓRIO", use_container_width=True):
+            st.session_state.view_mode = "RELATÓRIO"
+    with b2:
+        if st.button("CADASTRAR INSTALAÇÃO", use_container_width=True):
+            st.session_state.view_mode = "CADASTRAR INSTALAÇÃO"
+
+    st.divider()
+
+with st.sidebar:
     st.header("Filtros")
 
     # Seletor de dashboard (cada opção aponta para uma aba da planilha)
@@ -593,6 +652,179 @@ with st.sidebar:
     )
 
     SHEET_NAME = DASHBOARDS[selected_dashboard]
+
+
+# =============================
+# Tela: Cadastro de Instalação
+# =============================
+def _is_valid_time_hhmm(s: str) -> bool:
+    s = (s or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        return False
+    h = int(m.group(1))
+    mi = int(m.group(2))
+    return 0 <= h <= 23 and 0 <= mi <= 59
+
+
+def _parse_date_ddmmyyyy(s: str):
+    s = (s or "").strip()
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors="raise")
+        return dt.date()
+    except Exception:
+        return None
+
+
+def _parse_brl_number_str(s: str):
+    # Aceita números com vírgula; converte usando helper existente
+    return parse_brl_money(s)
+
+
+if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
+    st.title("📝 Cadastrar Instalação")
+
+    st.caption(f"Aba de destino: **{SHEET_NAME}**")
+
+    with st.form("form_instalacao", clear_on_submit=False):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            data_txt = st.text_input("Data", placeholder="05/01/2026")
+            inicio_txt = st.text_input("Início", placeholder="13:20")
+            termino_txt = st.text_input("Término", placeholder="15:10")
+
+        with c2:
+            modalidade = st.selectbox(
+                "Modalidade",
+                ["Remota", "Presencial", "Híbrida", "Evento", "Apresentação", "Boas-vindas"],
+            )
+            consultor = st.selectbox(
+                "Consultor",
+                ["Shimada", "André", "Jefferson", "Sandro", "Renato"],
+            )
+            tecnico = st.selectbox(
+                "Técnico",
+                ["Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"],
+            )
+
+        with c3:
+            status = st.selectbox("Status", ["Concluído", "Cancelado", "Reagendar"])
+            uf_txt = st.text_input("UF", placeholder="SP", max_chars=2)
+            cidade_txt = st.text_input("Cidade")
+
+        st.divider()
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            cliente_txt = st.text_input("Cliente")
+            cv_txt = st.text_input("CV")
+            cv_inst_txt = st.text_input("CV Instalação (código)")
+
+        with c5:
+            emissor_tipo = st.selectbox(
+                "Emissor de senhas",
+                ["Quiosque de chão", "Quiosque de mesa", "Portátil", "Software", "Sem emissor"],
+            )
+            emissor_cliente = st.selectbox("Emissor cliente", ["FALSE", "TRUE"])
+            emissores_qtd = st.number_input("Emissores (quantidade)", min_value=0, step=1, value=0)
+
+        with c6:
+            player_tipo = st.selectbox(
+                "Player",
+                ["Stick Player", "MiniPC", "Software", "Sem player"],
+            )
+            player_cliente = st.selectbox("Player cliente", ["FALSE", "TRUE"])
+            players_qtd = st.number_input("Players (quantidade)", min_value=0, step=1, value=0)
+
+        st.divider()
+
+        c7, c8, c9 = st.columns(3)
+        with c7:
+            plano = st.selectbox(
+                "Plano",
+                ["TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"],
+            )
+
+        with c8:
+            valor_txt = st.text_input("Valor da instalação", placeholder="500,00")
+
+        with c9:
+            motivo_reag = st.selectbox(
+                "Motivo reagendamento",
+                ["Finalizar treinamento", "Finalizar instalação", "Infraestrutura", "Stick", "Totem", "Cancelamento"],
+            )
+            duracao_txt = st.text_input("Duração", placeholder="01:30")
+
+        observacao_txt = st.text_area("Observação")
+
+        submitted = st.form_submit_button("Salvar na planilha", use_container_width=True)
+
+    if submitted:
+        errors = []
+
+        d = _parse_date_ddmmyyyy(data_txt)
+        if not d:
+            errors.append("Data inválida (use dd/mm/aaaa, ex.: 05/01/2026).")
+
+        if not _is_valid_time_hhmm(inicio_txt):
+            errors.append("Início inválido (use HH:MM, ex.: 13:20).")
+        if not _is_valid_time_hhmm(termino_txt):
+            errors.append("Término inválido (use HH:MM, ex.: 15:10).")
+        if duracao_txt.strip() and not _is_valid_time_hhmm(duracao_txt):
+            errors.append("Duração inválida (use HH:MM, ex.: 01:30).")
+
+        uf_clean = (uf_txt or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}", uf_clean):
+            errors.append("UF inválida (use apenas 2 letras, ex.: SP).")
+
+        valor_num = _parse_brl_number_str(valor_txt)
+        if valor_txt.strip() and valor_num is None:
+            errors.append("Valor da instalação inválido (use números e vírgula, ex.: 500,00).")
+
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            # Monta dicionário por header (vai ser reordenado pelo cabeçalho real da aba)
+            values_by_header = {
+                "Data": d.strftime("%d/%m/%Y"),
+                "Início": inicio_txt.strip(),
+                "Término": termino_txt.strip(),
+                "Modalidade": modalidade,
+                "Consultor": consultor,
+                "Cliente": cliente_txt.strip(),
+                "Emissor de senhas": emissor_tipo,
+                "Emissor cliente": emissor_cliente,
+                "Emissores": int(emissores_qtd),
+                "Quantidade Quiosque": int(emissores_qtd),  # compatibilidade com o dashboard atual
+                "Player": player_tipo,
+                "Player cliente": player_cliente,
+                "Players": int(players_qtd),
+                "Quantidade Players": int(players_qtd),     # compatibilidade com o dashboard atual
+                "UF": uf_clean,
+                "Cidade": cidade_txt.strip(),
+                "Técnico": tecnico,
+                "Status": status,
+                "CV": cv_txt.strip(),
+                "Plano": plano,
+                "CV Instalação": cv_inst_txt.strip(),
+                "Valor da instalação": (valor_txt.strip() if valor_txt.strip() else ""),
+                "Motivo reagendamento": motivo_reag,
+                "Observação": observacao_txt.strip(),
+                "Duração": duracao_txt.strip(),
+            }
+
+            try:
+                append_row_to_sheet(SPREADSHEET_ID, SHEET_NAME, values_by_header)
+                st.success("✅ Registro salvo na planilha!")
+                st.info("Se você voltar para **RELATÓRIO**, o dashboard vai recarregar com os novos dados.")
+            except Exception as ex:
+                st.error(f"Não foi possível salvar na planilha: {ex}")
+
+    # Não renderiza o relatório quando estiver no modo de cadastro
+    st.stop()
+
 
 # Sempre relê a planilha (sincronismo a cada alteração de filtro)
 df_raw = read_sheet(SPREADSHEET_ID, SHEET_NAME)
