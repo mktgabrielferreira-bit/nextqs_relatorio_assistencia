@@ -755,27 +755,21 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
     st.title("📝 Cadastrar Instalação")
     st.caption(f"Aba de destino: **{SHEET_NAME}**")
 
+    # Máscara simples via on_change (fora de st.form, então é permitido)
+    def _on_data_change():
+        st.session_state.data_txt = _mask_date_ddmmyyyy(st.session_state.get("data_txt", ""))
+
+    def _on_inicio_change():
+        st.session_state.inicio_txt = _mask_time_hhmm(st.session_state.get("inicio_txt", ""))
+
+    def _on_termino_change():
+        st.session_state.termino_txt = _mask_time_hhmm(st.session_state.get("termino_txt", ""))
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", max_chars=10)
-        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", max_chars=5)
-        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", max_chars=5)
-
-        # Máscara "ao digitar" (cada tecla gera rerun; se mudar, atualiza e reroda)
-        _d = _mask_date_ddmmyyyy(data_txt)
-        if _d != data_txt:
-            st.session_state["data_txt"] = _d
-            st.rerun()
-
-        _i = _mask_time_hhmm(inicio_txt)
-        if _i != inicio_txt:
-            st.session_state["inicio_txt"] = _i
-            st.rerun()
-
-        _t = _mask_time_hhmm(termino_txt)
-        if _t != termino_txt:
-            st.session_state["termino_txt"] = _t
-            st.rerun()
+        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", max_chars=10, on_change=_on_data_change)
+        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", max_chars=5, on_change=_on_inicio_change)
+        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", max_chars=5, on_change=_on_termino_change)
 
     with c2:
         modalidade = st.selectbox(
@@ -825,12 +819,12 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
 
     c7, c8, c9 = st.columns(3)
     with c7:
-        plano_opts = ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"]
+                plano_opts = ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"]
         plano = st.selectbox(
             "Plano",
             plano_opts,
             index=0,
-            key="plano_sel_v2",
+            key="plano_sel_v3",
         )
 
     with c8:
