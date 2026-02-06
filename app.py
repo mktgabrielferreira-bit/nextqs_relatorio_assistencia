@@ -667,25 +667,6 @@ def _is_valid_time_hhmm(s: str) -> bool:
 
 from datetime import datetime, timedelta
 
-def _digits_only(x: str) -> str:
-    return re.sub(r"\D", "", x or "")
-
-def _format_date_ddmmyyyy_digits(x: str) -> str:
-    """Autoformata dd/mm/aaaa enquanto digita (apenas números)."""
-    d = _digits_only(x)[:8]
-    if len(d) <= 2:
-        return d
-    if len(d) <= 4:
-        return f"{d[:2]}/{d[2:]}"
-    return f"{d[:2]}/{d[2:4]}/{d[4:]}"
-
-def _format_time_hhmm_digits(x: str) -> str:
-    """Autoformata HH:MM enquanto digita (apenas números)."""
-    d = _digits_only(x)[:4]
-    if len(d) <= 2:
-        return d
-    return f"{d[:2]}:{d[2:]}"
-
 def _parse_date_ddmmyyyy(s: str):
     s = (s or "").strip()
     try:
@@ -732,19 +713,27 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            # Inputs com autoformatação (usuário digita só números)
-            def _on_data_change():
-                st.session_state.data_txt = _format_date_ddmmyyyy_digits(st.session_state.get("data_txt", ""))
+            # Data (usuário digita só números)
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                dia = st.number_input("Dia", min_value=1, max_value=31, step=1, value=1)
+            with d2:
+                mes = st.number_input("Mês", min_value=1, max_value=12, step=1, value=1)
+            with d3:
+                ano = st.number_input("Ano", min_value=2000, max_value=2100, step=1, value=2026)
 
-            def _on_inicio_change():
-                st.session_state.inicio_txt = _format_time_hhmm_digits(st.session_state.get("inicio_txt", ""))
+            # Horários (usuário digita só números)
+            h1, h2 = st.columns(2)
+            with h1:
+                inicio_h = st.number_input("Início (hora)", min_value=0, max_value=23, step=1, value=13)
+                inicio_m = st.number_input("Início (min)", min_value=0, max_value=59, step=1, value=0)
+            with h2:
+                termino_h = st.number_input("Término (hora)", min_value=0, max_value=23, step=1, value=15)
+                termino_m = st.number_input("Término (min)", min_value=0, max_value=59, step=1, value=0)
 
-            def _on_termino_change():
-                st.session_state.termino_txt = _format_time_hhmm_digits(st.session_state.get("termino_txt", ""))
-
-            data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", on_change=_on_data_change, max_chars=10)
-            inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", on_change=_on_inicio_change, max_chars=5)
-            termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", on_change=_on_termino_change, max_chars=5)
+            data_txt = f"{int(dia):02d}/{int(mes):02d}/{int(ano)}"
+            inicio_txt = f"{int(inicio_h):02d}:{int(inicio_m):02d}"
+            termino_txt = f"{int(termino_h):02d}:{int(termino_m):02d}"
 
         with c2:
             modalidade = st.selectbox(
