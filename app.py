@@ -113,22 +113,29 @@ def append_row_to_sheet(
         v = values_by_header.get(key, "")
         row.append("" if v is None else str(v))
 
-    
-    # Insere na primeira linha vazia (após o cabeçalho). Se não houver "buraco", adiciona no final.
-    all_vals = ws.get_all_values()
-    # all_vals inclui o cabeçalho na posição 0
+    # Procura a primeira linha vazia usando a coluna A (ex.: "Data")
+    # Obs: usando range fixo, conseguimos "ver" buracos.
+    col_a = ws.get(f"A2:A{ws.row_count}")  # lista de linhas; vazias podem vir como [] ou não vir
+
+    # Normaliza para ter exatamente (row_count - 1) itens
+    # (cada item é [] ou ["valor"])
+    if len(col_a) < (ws.row_count - 1):
+        col_a = col_a + [[]] * ((ws.row_count - 1) - len(col_a))
+
     first_empty_row = None
-    for i in range(1, len(all_vals)):  # começa após header
-        r = all_vals[i]
-        r = r[: len(headers)] + [""] * max(0, len(headers) - len(r))
-        if all(str(x).strip() == "" for x in r):
-            first_empty_row = i + 1  # gspread é 1-indexed
+    for offset, cell in enumerate(col_a, start=2):  # começa na linha 2
+        val = ""
+        if cell and len(cell) > 0:
+            val = str(cell[0]).strip()
+        if val == "":
+            first_empty_row = offset
             break
 
     if first_empty_row is None:
         ws.append_row(row, value_input_option="USER_ENTERED")
     else:
         ws.insert_row(row, index=first_empty_row, value_input_option="USER_ENTERED")
+
 
 # Ajuste aqui se os nomes das colunas na planilha forem diferentes
 COL_DATA = "Data"
