@@ -624,7 +624,8 @@ def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
 # =============================
 # Header + Load
 # =============================
-st.title("📊 Relatório de Instalações NextQS")
+if st.session_state.get("view_mode", "RELATÓRIO") == "RELATÓRIO":
+    st.title("📊 Relatório de Instalações NextQS")
 
 SPREADSHEET_ID = st.secrets.get("spreadsheet_id", "")
 SHEET_NAME = None  # definido pelo seletor de dashboard
@@ -723,21 +724,11 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
     st.title("📝 Cadastrar Instalação")
     st.caption(f"Aba de destino: **{SHEET_NAME}**")
 
-    # Autoformatação (fora de st.form, então callbacks são permitidos)
-    def _on_data_change():
-        st.session_state.data_txt = _format_date_ddmmyyyy_digits(st.session_state.get("data_txt", ""))
-
-    def _on_inicio_change():
-        st.session_state.inicio_txt = _format_time_hhmm_digits(st.session_state.get("inicio_txt", ""))
-
-    def _on_termino_change():
-        st.session_state.termino_txt = _format_time_hhmm_digits(st.session_state.get("termino_txt", ""))
-
     c1, c2, c3 = st.columns(3)
     with c1:
-        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", on_change=_on_data_change, max_chars=10)
-        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", on_change=_on_inicio_change, max_chars=5)
-        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", on_change=_on_termino_change, max_chars=5)
+        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", max_chars=10)
+        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", max_chars=5)
+        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", max_chars=5)
 
     with c2:
         modalidade = st.selectbox(
@@ -812,10 +803,20 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
         if not d:
             errors.append("Data inválida (use dd/mm/aaaa, ex.: 05/01/2026).")
 
+        # Permite apenas números e "/" na Data
+        if data_txt.strip() and not re.fullmatch(r"[0-9/]+", data_txt.strip()):
+            errors.append("Data: use apenas números e '/'.")
+
         if _parse_time_hhmm(inicio_txt.strip()) is None:
             errors.append("Início inválido (use HH:MM, ex.: 13:20).")
         if _parse_time_hhmm(termino_txt.strip()) is None:
             errors.append("Término inválido (use HH:MM, ex.: 15:10).")
+
+        # Permite apenas números e ":" nos horários
+        if inicio_txt.strip() and not re.fullmatch(r"[0-9:]+", inicio_txt.strip()):
+            errors.append("Início: use apenas números e ':'.")
+        if termino_txt.strip() and not re.fullmatch(r"[0-9:]+", termino_txt.strip()):
+            errors.append("Término: use apenas números e ':'.")
 
         uf_clean = (uf_txt or "").strip().upper()
         if not re.fullmatch(r"[A-Z]{2}", uf_clean):
