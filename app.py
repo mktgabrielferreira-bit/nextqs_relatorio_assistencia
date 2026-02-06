@@ -113,7 +113,22 @@ def append_row_to_sheet(
         v = values_by_header.get(key, "")
         row.append("" if v is None else str(v))
 
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    
+    # Insere na primeira linha vazia (após o cabeçalho). Se não houver "buraco", adiciona no final.
+    all_vals = ws.get_all_values()
+    # all_vals inclui o cabeçalho na posição 0
+    first_empty_row = None
+    for i in range(1, len(all_vals)):  # começa após header
+        r = all_vals[i]
+        r = r[: len(headers)] + [""] * max(0, len(headers) - len(r))
+        if all(str(x).strip() == "" for x in r):
+            first_empty_row = i + 1  # gspread é 1-indexed
+            break
+
+    if first_empty_row is None:
+        ws.append_row(row, value_input_option="USER_ENTERED")
+    else:
+        ws.insert_row(row, index=first_empty_row, value_input_option="USER_ENTERED")
 
 # Ajuste aqui se os nomes das colunas na planilha forem diferentes
 COL_DATA = "Data"
@@ -706,100 +721,91 @@ def _parse_brl_number_str(s: str):
 
 if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
     st.title("📝 Cadastrar Instalação")
-
     st.caption(f"Aba de destino: **{SHEET_NAME}**")
 
-    with st.form("form_instalacao", clear_on_submit=False):
-        c1, c2, c3 = st.columns(3)
+    # Autoformatação (fora de st.form, então callbacks são permitidos)
+    def _on_data_change():
+        st.session_state.data_txt = _format_date_ddmmyyyy_digits(st.session_state.get("data_txt", ""))
 
-        with c1:
-            # Data (usuário digita só números)
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                dia = st.number_input("Dia", min_value=1, max_value=31, step=1, value=1)
-            with d2:
-                mes = st.number_input("Mês", min_value=1, max_value=12, step=1, value=1)
-            with d3:
-                ano = st.number_input("Ano", min_value=2000, max_value=2100, step=1, value=2026)
+    def _on_inicio_change():
+        st.session_state.inicio_txt = _format_time_hhmm_digits(st.session_state.get("inicio_txt", ""))
 
-            # Horários (usuário digita só números)
-            h1, h2 = st.columns(2)
-            with h1:
-                inicio_h = st.number_input("Início (hora)", min_value=0, max_value=23, step=1, value=13)
-                inicio_m = st.number_input("Início (min)", min_value=0, max_value=59, step=1, value=0)
-            with h2:
-                termino_h = st.number_input("Término (hora)", min_value=0, max_value=23, step=1, value=15)
-                termino_m = st.number_input("Término (min)", min_value=0, max_value=59, step=1, value=0)
+    def _on_termino_change():
+        st.session_state.termino_txt = _format_time_hhmm_digits(st.session_state.get("termino_txt", ""))
 
-            data_txt = f"{int(dia):02d}/{int(mes):02d}/{int(ano)}"
-            inicio_txt = f"{int(inicio_h):02d}:{int(inicio_m):02d}"
-            termino_txt = f"{int(termino_h):02d}:{int(termino_m):02d}"
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", on_change=_on_data_change, max_chars=10)
+        inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", on_change=_on_inicio_change, max_chars=5)
+        termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", on_change=_on_termino_change, max_chars=5)
 
-        with c2:
-            modalidade = st.selectbox(
-                "Modalidade",
-                ["Remota", "Presencial", "Híbrida", "Evento", "Apresentação", "Boas-vindas"],
-            )
-            consultor = st.selectbox(
-                "Consultor",
-                ["Shimada", "André", "Jefferson", "Sandro", "Renato"],
-            )
-            tecnico = st.selectbox(
-                "Técnico",
-                ["Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"],
-            )
+    with c2:
+        modalidade = st.selectbox(
+            "Modalidade",
+            ["Remota", "Presencial", "Híbrida", "Evento", "Apresentação", "Boas-vindas"],
+        )
+        consultor = st.selectbox(
+            "Consultor",
+            ["Shimada", "André", "Jefferson", "Sandro", "Renato"],
+        )
+        tecnico = st.selectbox(
+            "Técnico",
+            ["Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"],
+        )
 
-        with c3:
-            status = st.selectbox("Status", ["Concluído", "Cancelado", "Reagendar"])
-            uf_txt = st.text_input("UF", placeholder="SP", max_chars=2)
-            cidade_txt = st.text_input("Cidade")
+    with c3:
+        status = st.selectbox("Status", ["Concluído", "Cancelado", "Reagendar"])
+        uf_txt = st.text_input("UF", placeholder="SP", max_chars=2)
+        cidade_txt = st.text_input("Cidade")
 
-        st.divider()
+    st.divider()
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            cliente_txt = st.text_input("Cliente")
-            cv_txt = st.text_input("CV")
-            cv_inst_txt = st.text_input("CV Instalação (código)")
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        cliente_txt = st.text_input("Cliente")
+        cv_txt = st.text_input("CV")
+        cv_inst_txt = st.text_input("CV Instalação (código)")
 
-        with c5:
-            emissor_tipo = st.selectbox(
-                "Emissor de senhas",
-                ["Quiosque de chão", "Quiosque de mesa", "Portátil", "Software", "Sem emissor"],
-            )
-            emissor_cliente = st.selectbox("Emissor cliente", ["FALSE", "TRUE"])
-            emissores_qtd = st.number_input("Emissores (quantidade)", min_value=0, step=1, value=0)
+    with c5:
+        emissor_tipo = st.selectbox(
+            "Emissor de senhas",
+            ["Quiosque de chão", "Quiosque de mesa", "Portátil", "Software", "Sem emissor"],
+        )
+        emissor_cliente = st.selectbox("Emissor cliente", ["FALSE", "TRUE"])
+        emissores_qtd = st.number_input("Emissores (quantidade)", min_value=0, step=1, value=0)
 
-        with c6:
-            player_tipo = st.selectbox(
-                "Player",
-                ["Stick Player", "MiniPC", "Software", "Sem player"],
-            )
-            player_cliente = st.selectbox("Player cliente", ["FALSE", "TRUE"])
-            players_qtd = st.number_input("Players (quantidade)", min_value=0, step=1, value=0)
+    with c6:
+        player_tipo = st.selectbox(
+            "Player",
+            ["Stick Player", "MiniPC", "Software", "Sem player"],
+        )
+        player_cliente = st.selectbox("Player cliente", ["FALSE", "TRUE"])
+        players_qtd = st.number_input("Players (quantidade)", min_value=0, step=1, value=0)
 
-        st.divider()
+    st.divider()
 
-        c7, c8, c9 = st.columns(3)
-        with c7:
-            plano = st.selectbox(
-                "Plano",
-                ["TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"],
-            )
+    c7, c8, c9 = st.columns(3)
+    with c7:
+        plano = st.selectbox(
+            "Plano",
+            ["TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"],
+        )
 
-        with c8:
-            valor_txt = st.text_input("Valor da instalação", placeholder="500,00")
+    with c8:
+        valor_txt = st.text_input("Valor da instalação", placeholder="500,00")
 
-        with c9:
-            motivo_reag = st.selectbox(
-                "Motivo reagendamento",
-                ["Finalizar treinamento", "Finalizar instalação", "Infraestrutura", "Stick", "Totem", "Cancelamento"],
-            )
-        observacao_txt = st.text_area("Observação")
+    with c9:
+        motivo_reag = st.selectbox(
+            "Motivo reagendamento",
+            ["", "Finalizar treinamento", "Finalizar instalação", "Infraestrutura", "Stick", "Totem", "Cancelamento"],
+            index=0,
+        )
 
-        submitted = st.form_submit_button("Salvar na planilha", use_container_width=True)
+    observacao_txt = st.text_area("Observação")
 
-    if submitted:
+    salvar = st.button("Salvar na planilha", use_container_width=True)
+
+    if salvar:
         errors = []
 
         d = _parse_date_ddmmyyyy(data_txt)
@@ -831,7 +837,6 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
             for e in errors:
                 st.error(e)
         else:
-            # Monta dicionário por header (vai ser reordenado pelo cabeçalho real da aba)
             values_by_header = {
                 "Data": d.strftime("%d/%m/%Y"),
                 "Início": inicio_txt.strip(),
@@ -842,11 +847,11 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
                 "Emissor de senhas": emissor_tipo,
                 "Emissor cliente": emissor_cliente,
                 "Emissores": int(emissores_qtd),
-                "Quantidade Quiosque": int(emissores_qtd),  # compatibilidade com o dashboard atual
+                "Quantidade Quiosque": int(emissores_qtd),
                 "Player": player_tipo,
                 "Player cliente": player_cliente,
                 "Players": int(players_qtd),
-                "Quantidade Players": int(players_qtd),     # compatibilidade com o dashboard atual
+                "Quantidade Players": int(players_qtd),
                 "UF": uf_clean,
                 "Cidade": cidade_txt.strip(),
                 "Técnico": tecnico,
@@ -855,7 +860,7 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
                 "Plano": plano,
                 "CV Instalação": cv_inst_txt.strip(),
                 "Valor da instalação": (valor_txt.strip() if valor_txt.strip() else ""),
-                "Motivo reagendamento": motivo_reag,
+                "Motivo reagendamento": (motivo_reag.strip() if motivo_reag else ""),
                 "Observação": observacao_txt.strip(),
                 "Duração": (duracao_calc or ""),
             }
@@ -867,8 +872,8 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
             except Exception as ex:
                 st.error(f"Não foi possível salvar na planilha: {ex}")
 
-    # Não renderiza o relatório quando estiver no modo de cadastro
     st.stop()
+
 
 
 # Sempre relê a planilha (sincronismo a cada alteração de filtro)
