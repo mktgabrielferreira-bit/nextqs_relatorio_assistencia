@@ -819,7 +819,7 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
 
     c7, c8, c9 = st.columns(3)
     with c7:
-                plano_opts = ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"]
+        plano_opts = ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"]
         plano = st.selectbox(
             "Plano",
             plano_opts,
