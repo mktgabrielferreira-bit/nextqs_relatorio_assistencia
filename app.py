@@ -623,13 +623,10 @@ with st.sidebar:
     if "view_mode" not in st.session_state:
         st.session_state.view_mode = "RELATÓRIO"
 
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("RELATÓRIO", use_container_width=True):
-            st.session_state.view_mode = "RELATÓRIO"
-    with b2:
-        if st.button("CADASTRAR INSTALAÇÃO", use_container_width=True):
-            st.session_state.view_mode = "CADASTRAR INSTALAÇÃO"
+    if st.button("RELATÓRIO", use_container_width=True):
+        st.session_state.view_mode = "RELATÓRIO"
+    if st.button("CADASTRAR INSTALAÇÃO", use_container_width=True):
+        st.session_state.view_mode = "CADASTRAR INSTALAÇÃO"
 
     st.divider()
 
@@ -667,14 +664,59 @@ def _is_valid_time_hhmm(s: str) -> bool:
     return 0 <= h <= 23 and 0 <= mi <= 59
 
 
+
+from datetime import datetime, timedelta
+
+def _digits_only(x: str) -> str:
+    return re.sub(r"\D", "", x or "")
+
+def _format_date_ddmmyyyy_digits(x: str) -> str:
+    """Autoformata dd/mm/aaaa enquanto digita (apenas números)."""
+    d = _digits_only(x)[:8]
+    if len(d) <= 2:
+        return d
+    if len(d) <= 4:
+        return f"{d[:2]}/{d[2:]}"
+    return f"{d[:2]}/{d[2:4]}/{d[4:]}"
+
+def _format_time_hhmm_digits(x: str) -> str:
+    """Autoformata HH:MM enquanto digita (apenas números)."""
+    d = _digits_only(x)[:4]
+    if len(d) <= 2:
+        return d
+    return f"{d[:2]}:{d[2:]}"
+
 def _parse_date_ddmmyyyy(s: str):
     s = (s or "").strip()
     try:
-        dt = pd.to_datetime(s, dayfirst=True, errors="raise")
-        return dt.date()
+        return datetime.strptime(s, "%d/%m/%Y").date()
     except Exception:
         return None
 
+def _parse_time_hhmm(s: str):
+    s = (s or "").strip()
+    if not re.fullmatch(r"\d{2}:\d{2}", s):
+        return None
+    try:
+        return datetime.strptime(s, "%H:%M").time()
+    except Exception:
+        return None
+
+def _duration_hhmm(start_hhmm: str, end_hhmm: str) -> str:
+    """Calcula duração HH:MM a partir de 'HH:MM' e 'HH:MM'. Erro se término < início."""
+    t1 = _parse_time_hhmm(start_hhmm)
+    t2 = _parse_time_hhmm(end_hhmm)
+    if not t1 or not t2:
+        raise ValueError("Horário inválido para cálculo de duração.")
+    dt1 = datetime.combine(datetime.today().date(), t1)
+    dt2 = datetime.combine(datetime.today().date(), t2)
+    if dt2 < dt1:
+        raise ValueError("Término não pode ser menor que Início.")
+    diff: timedelta = dt2 - dt1
+    total_minutes = int(diff.total_seconds() // 60)
+    h = total_minutes // 60
+    m = total_minutes % 60
+    return f"{h:02d}:{m:02d}"
 
 def _parse_brl_number_str(s: str):
     # Aceita números com vírgula; converte usando helper existente
@@ -690,9 +732,19 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            data_txt = st.text_input("Data", placeholder="05/01/2026")
-            inicio_txt = st.text_input("Início", placeholder="13:20")
-            termino_txt = st.text_input("Término", placeholder="15:10")
+            # Inputs com autoformatação (usuário digita só números)
+            def _on_data_change():
+                st.session_state.data_txt = _format_date_ddmmyyyy_digits(st.session_state.get("data_txt", ""))
+
+            def _on_inicio_change():
+                st.session_state.inicio_txt = _format_time_hhmm_digits(st.session_state.get("inicio_txt", ""))
+
+            def _on_termino_change():
+                st.session_state.termino_txt = _format_time_hhmm_digits(st.session_state.get("termino_txt", ""))
+
+            data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="data_txt", on_change=_on_data_change, max_chars=10)
+            inicio_txt = st.text_input("Início", placeholder="hh:mm", key="inicio_txt", on_change=_on_inicio_change, max_chars=5)
+            termino_txt = st.text_input("Término", placeholder="hh:mm", key="termino_txt", on_change=_on_termino_change, max_chars=5)
 
         with c2:
             modalidade = st.selectbox(
@@ -754,8 +806,6 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
                 "Motivo reagendamento",
                 ["Finalizar treinamento", "Finalizar instalação", "Infraestrutura", "Stick", "Totem", "Cancelamento"],
             )
-            duracao_txt = st.text_input("Duração", placeholder="01:30")
-
         observacao_txt = st.text_area("Observação")
 
         submitted = st.form_submit_button("Salvar na planilha", use_container_width=True)
@@ -767,12 +817,10 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
         if not d:
             errors.append("Data inválida (use dd/mm/aaaa, ex.: 05/01/2026).")
 
-        if not _is_valid_time_hhmm(inicio_txt):
+        if _parse_time_hhmm(inicio_txt.strip()) is None:
             errors.append("Início inválido (use HH:MM, ex.: 13:20).")
-        if not _is_valid_time_hhmm(termino_txt):
+        if _parse_time_hhmm(termino_txt.strip()) is None:
             errors.append("Término inválido (use HH:MM, ex.: 15:10).")
-        if duracao_txt.strip() and not _is_valid_time_hhmm(duracao_txt):
-            errors.append("Duração inválida (use HH:MM, ex.: 01:30).")
 
         uf_clean = (uf_txt or "").strip().upper()
         if not re.fullmatch(r"[A-Z]{2}", uf_clean):
@@ -781,6 +829,14 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
         valor_num = _parse_brl_number_str(valor_txt)
         if valor_txt.strip() and valor_num is None:
             errors.append("Valor da instalação inválido (use números e vírgula, ex.: 500,00).")
+
+        # Calcula duração (HH:MM) a partir de Início e Término
+        duracao_calc = None
+        if not errors:
+            try:
+                duracao_calc = _duration_hhmm(inicio_txt.strip(), termino_txt.strip())
+            except Exception as ex:
+                errors.append(str(ex))
 
         if errors:
             for e in errors:
@@ -812,7 +868,7 @@ if st.session_state.get("view_mode") == "CADASTRAR INSTALAÇÃO":
                 "Valor da instalação": (valor_txt.strip() if valor_txt.strip() else ""),
                 "Motivo reagendamento": motivo_reag,
                 "Observação": observacao_txt.strip(),
-                "Duração": duracao_txt.strip(),
+                "Duração": (duracao_calc or ""),
             }
 
             try:
