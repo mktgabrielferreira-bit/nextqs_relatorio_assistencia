@@ -346,6 +346,53 @@ def cliente_base(nome: object) -> str:
     return s
 
 
+def normalize_status(value: object) -> str:
+    """Normaliza o status para comparação (sem acentos, minúsculo)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    s = str(value).strip().lower()
+    if not s:
+        return ""
+    # remove acentos comuns (concluído/concluido etc.)
+    s = (
+        s.replace("á", "a").replace("à", "a").replace("ã", "a").replace("â", "a")
+        .replace("é", "e").replace("ê", "e")
+        .replace("í", "i")
+        .replace("ó", "o").replace("ô", "o").replace("õ", "o")
+        .replace("ú", "u")
+        .replace("ç", "c")
+    )
+    return s
+
+
+def is_concluido(status_value: object) -> bool:
+    s = normalize_status(status_value)
+    return s.startswith("conclu")
+
+
+def is_cancelado(status_value: object) -> bool:
+    s = normalize_status(status_value)
+    return s.startswith("cancel")
+
+
+def is_reagendar(status_value: object) -> bool:
+    s = normalize_status(status_value)
+    return "reagend" in s or s.startswith("reagendar") or s.startswith("reagendado")
+
+
+def split_tecnicos(value: object) -> list[str]:
+    """Divide campo de técnico(s) em lista (suporta vírgula, ';', '/', '\\' e ' e ')."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    s = str(value).strip()
+    if not s:
+        return []
+    s = re.sub(r"\s*(,|;|/|\\)\s*", ",", s)
+    s = re.sub(r"\s+e\s+", ",", s, flags=re.IGNORECASE)
+    parts = [p.strip() for p in s.split(",")]
+    return [p for p in parts if p]
+
+
 def month_label_pt(ym: str) -> str:
     """Converte 'YYYY-MM' em rótulo pt-br curto (ex.: '2026-01' -> 'jan/2026')."""
     meses = [
@@ -1090,14 +1137,19 @@ if "sel_cliente" in locals() and sel_cliente and safe_col(df_f, COL_CLIENTE):
 df_f = apply_multiselect(df_f, COL_PLANO, sel_plano if "sel_plano" in locals() else [])
 
 if "tecnico_col" in locals() and tecnico_col:
-    df_f = apply_multiselect(df_f, tecnico_col, sel_tecnico if "sel_tecnico" in locals() else [])
+    # Quando há mais de um técnico na mesma instalação, consideramos "match" se QUALQUER técnico estiver selecionado.
+    if "sel_tecnico" in locals() and sel_tecnico:
+        sel_set = set(str(x).strip() for x in sel_tecnico if str(x).strip())
+        if sel_set:
+            df_f = df_f[df_f[tecnico_col].map(lambda v: bool(set(split_tecnicos(v)) & sel_set))]
 if "consultor_col" in locals() and consultor_col:
     df_f = apply_multiselect(df_f, consultor_col, sel_consultor if "sel_consultor" in locals() else [])
 
 # =============================
 # KPIs (destaques)
 # =============================
-total_instalacoes = len(df_f)
+status_col_main = first_existing_col(df_f, [COL_STATUS, 'Status da Instalação', 'Status Instalação', 'Situacao', 'Situação'])
+instalacoes_concluidas = int(df_f[status_col_main].map(is_concluido).sum()) if status_col_main else 0
 
 tempo_medio_str = "—"
 if safe_col(df_f, COL_DURACAO):
@@ -1112,7 +1164,7 @@ taxa_reag = f"{reag_rate*100:.1f}%" if reag_rate is not None else "—"
 taxa_reag_color = COR2 if (reag_rate is not None and reag_rate >= 0.26) else COR1
 k1, k2, k3, k4 = st.columns(4)
 with k1:
-    kpi_card("Total de Instalações", f"{total_instalacoes}", color=COR1)
+    kpi_card("Instalações Concluídas", f"{instalacoes_concluidas}", color=COR1)
 with k2:
     kpi_card("Tempo Médio", tempo_medio_str, color=COR1)
 with k3:
@@ -1229,7 +1281,52 @@ with g2:
         ],
     )
     if status_col:
-        bar_chart_counts(df_f[status_col], top_n=20, y_label="Instalações")
+        # Bucket do status conforme regra:
+        # - Concluído
+        # - Reagendar - Cortesia (Status Reagendar e Valor da instalação == 0)
+        # - Reagendar (Status Reagendar e Valor da instalação != 0)
+        # - Cancelado
+        def _bucket_status(row: pd.Series) -> str:
+            stv = row.get(status_col, "")
+            if is_concluido(stv):
+                return "Concluído"
+            if is_cancelado(stv):
+                return "Cancelado"
+            if is_reagendar(stv):
+                v = parse_brl_money(row.get(COL_VALOR_INST, None))
+                v = 0.0 if v is None else float(v)
+                return "Reagendar - Cortesia" if v == 0 else "Reagendar"
+            return ""
+
+        s_bucket = df_f.apply(_bucket_status, axis=1)
+        s_bucket = s_bucket[s_bucket != ""]
+
+        if s_bucket.empty:
+            st.info("Sem dados de status para o gráfico.")
+        else:
+            # Mantém apenas as 4 categorias esperadas (e garante que não apareçam outras)
+            order = ["Concluído", "Reagendar - Cortesia", "Reagendar", "Cancelado"]
+            counts = s_bucket.value_counts()
+            dfc = pd.DataFrame({"Status": order, "Instalações": [int(counts.get(k, 0)) for k in order]})
+            dfc = dfc[dfc["Instalações"] > 0]
+
+            fig = px.bar(
+                dfc,
+                x="Status",
+                y="Instalações",
+                text="Instalações",
+                template="plotly_dark",
+                color_discrete_sequence=[COR1],
+            )
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=360,
+                margin=dict(l=20, r=20, t=20, b=20),
+                xaxis_title="",
+                yaxis_title="Instalações",
+            )
+            fig.update_xaxes(tickangle=-20)
+            st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Coluna de status não encontrada (ex.: 'Status').")
 
@@ -1242,14 +1339,16 @@ with c_left:
     st.subheader("Instalações por Técnico")
     tecnico_col_rank = first_existing_col(df_f, [COL_TECNICO, "Tecnico", "Técnicos", "Tecnicos"])
     if tecnico_col_rank:
-        tech_counts = (
+        tech_series = (
             df_f[tecnico_col_rank]
+            .map(split_tecnicos)
+            .explode()
             .dropna()
             .astype(str)
             .str.strip()
-            .value_counts()
-            .reset_index()
         )
+        tech_series = tech_series[tech_series != ""]
+        tech_counts = tech_series.value_counts().reset_index()
         tech_counts.columns = ["Técnico", "Instalações"]
 
         fig_tec = px.bar(
@@ -1290,23 +1389,57 @@ with cl_left:
     if safe_col(df_f, COL_CLIENTE):
         tmp = df_f.copy()
         tmp["_cliente_base"] = tmp[COL_CLIENTE].map(cliente_base)
-        cliente_counts = (
-            tmp["_cliente_base"]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-        cliente_counts = cliente_counts[cliente_counts != ""]
 
-        if cliente_counts.empty:
-            st.info("Sem dados de cliente para listar.")
+        status_col_tbl = first_existing_col(
+            tmp,
+            [
+                COL_STATUS,
+                "Status da Instalação",
+                "Status Instalação",
+                "Situacao",
+                "Situação",
+            ],
+        )
+        if not status_col_tbl:
+            st.info("Coluna de status não encontrada (ex.: 'Status').")
         else:
-            df_clientes = (
-                cliente_counts.value_counts()
-                .rename_axis("Cliente")
-                .reset_index(name="Instalações")
-            )
-            st.dataframe(df_clientes, use_container_width=True, height=360)
+            tmp["_is_concluido"] = tmp[status_col_tbl].map(is_concluido)
+            tmp["_is_reagendar"] = tmp[status_col_tbl].map(is_reagendar)
+            tmp["_is_cancelado"] = tmp[status_col_tbl].map(is_cancelado)
+
+            base = tmp["_cliente_base"].dropna().astype(str).str.strip()
+            base = base[base != ""]
+            tmp = tmp.loc[base.index].copy()
+
+            if tmp.empty:
+                st.info("Sem dados de cliente para listar.")
+            else:
+                df_clientes = (
+                    tmp.groupby("_cliente_base", dropna=False)
+                    .agg(
+                        Concluídas=("_is_concluido", "sum"),
+                        Reagendadas=("_is_reagendar", "sum"),
+                        Canceladas=("_is_cancelado", "sum"),
+                    )
+                    .reset_index()
+                    .rename(columns={"_cliente_base": "Cliente"})
+                )
+                df_clientes["Total"] = (
+                    df_clientes["Concluídas"]
+                    + df_clientes["Reagendadas"]
+                    + df_clientes["Canceladas"]
+                )
+                df_clientes = df_clientes.sort_values(["Total", "Cliente"], ascending=[False, True])
+
+                st.dataframe(df_clientes, use_container_width=True, height=360)
+
+                tot_conc = int(df_clientes["Concluídas"].sum())
+                tot_reag = int(df_clientes["Reagendadas"].sum())
+                tot_canc = int(df_clientes["Canceladas"].sum())
+                st.markdown(
+                    f"**Totais (no período filtrado):** Concluídas: **{tot_conc}** · "
+                    f"Reagendadas: **{tot_reag}** · Canceladas: **{tot_canc}**"
+                )
     else:
         st.info("Coluna 'Cliente' não encontrada.")
 
