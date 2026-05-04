@@ -390,6 +390,34 @@ def apply_multiselect(df_in: pd.DataFrame, col: str, selected: list[str]) -> pd.
     return df_in[df_in[col].astype(str).isin(selected)]
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def sheet_column_options(
+    spreadsheet_id: str,
+    sheet_name: str,
+    column_name: str,
+    fallback: tuple[str, ...],
+    include_blank: bool = True,
+) -> list[str]:
+    try:
+        df = read_sheet(spreadsheet_id, sheet_name)
+        if column_name in df.columns:
+            options = (
+                df[column_name]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .loc[lambda s: s.ne("")]
+                .drop_duplicates()
+                .tolist()
+            )
+            if options:
+                return ([""] if include_blank else []) + options
+    except Exception:
+        pass
+
+    return ([""] if include_blank else []) + list(fallback)
+
+
 # =============================
 # Configs dos módulos
 # =============================
@@ -554,11 +582,11 @@ def render_installation_form() -> None:
         cv_inst_txt = st.text_input("CV Instalação (código)")
     with c5:
         emissor_tipo = st.selectbox("Emissor de senhas", ["Quiosque de chão", "Quiosque de mesa", "Portátil", "Software", "Sem emissor"])
-        emissor_cliente = st.selectbox("Emissor cliente", ["FALSE", "TRUE"])
+        emissor_cliente = st.selectbox("Emissor fornecido pelo cliente?", ["NÃO", "SIM"])
         emissores_qtd = st.number_input("Emissores (quantidade)", min_value=0, step=1, value=0)
     with c6:
         player_tipo = st.selectbox("Player", ["Stick Player", "MiniPC", "Software", "Sem player"])
-        player_cliente = st.selectbox("Player cliente", ["FALSE", "TRUE"])
+        player_cliente = st.selectbox("Player fornecido pelo cliente?", ["NÃO", "SIM"])
         players_qtd = st.number_input("Players (quantidade)", min_value=0, step=1, value=0)
 
     st.divider()
@@ -651,34 +679,91 @@ def render_visit_form() -> None:
     def _on_termino_change():
         st.session_state.visit_termino_txt = _mask_time_hhmm(st.session_state.get("visit_termino_txt", ""))
 
+    modalidade_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Modalidade",
+        ("Remota", "Presencial", "Híbrida", "Evento", "Apresentação", "Boas-vindas"),
+    )
+    consultor_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Consultor",
+        ("Shimada", "André", "Jefferson", "Sandro", "Renato"),
+    )
+    tecnico_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Técnico",
+        ("Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"),
+    )
+    tipo_atendimento_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Tipo de Atendimento",
+        ("Treinamento", "Suporte", "Manutenção", "Visita técnica"),
+    )
+    tipo_treinamento_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Tipo de treinamento",
+        ("Operacional", "Administrativo", "Reciclagem"),
+    )
+    sistema_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Sistema",
+        ("NextQS", "NextCall", "NextTotem"),
+    )
+    status_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Status",
+        ("Concluído", "Cancelado", "Reagendar"),
+    )
+    equipamento_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Equipamento",
+        ("Emissor", "Player", "TV", "Totem", "Software"),
+    )
+    contratual_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Contratual",
+        ("Sim", "Não"),
+    )
+
     c1, c2, c3 = st.columns(3)
     with c1:
         data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="visit_data_txt", max_chars=10, on_change=_on_data_change)
         inicio_txt = st.text_input("Início", placeholder="hh:mm", key="visit_inicio_txt", max_chars=5, on_change=_on_inicio_change)
         termino_txt = st.text_input("Término", placeholder="hh:mm", key="visit_termino_txt", max_chars=5, on_change=_on_termino_change)
     with c2:
-        modalidade = st.text_input("Modalidade")
+        modalidade = st.selectbox("Modalidade", modalidade_options)
         cliente = st.text_input("Cliente")
-        consultor = st.text_input("Consultor")
+        consultor = st.selectbox("Consultor", consultor_options)
     with c3:
         uf_txt = st.text_input("UF", placeholder="SP", max_chars=2)
         cidade = st.text_input("Cidade")
-        tecnico = st.text_input("Técnico")
+        tecnico = st.selectbox("Técnico", tecnico_options)
 
     st.divider()
 
     c4, c5, c6 = st.columns(3)
     with c4:
         terceiro = st.text_input("Terceiro no local")
-        tipo_atendimento = st.text_input("Tipo de Atendimento")
-        equipamento = st.text_input("Equipamento")
+        tipo_atendimento = st.selectbox("Tipo de Atendimento", tipo_atendimento_options)
+        equipamento = st.selectbox("Equipamento", equipamento_options)
     with c5:
-        tipo_treinamento = st.text_input("Tipo de treinamento")
-        sistema = st.text_input("Sistema")
-        contratual = st.selectbox("Contratual", ["", "Sim", "Não"])
+        tipo_treinamento = ""
+        if tipo_atendimento.strip().casefold() == "treinamento":
+            tipo_treinamento = st.selectbox("Tipo de treinamento", tipo_treinamento_options)
+        sistema = st.selectbox("Sistema", sistema_options)
+        contratual = st.selectbox("Contratual", contratual_options)
     with c6:
         valor_txt = st.text_input("Valor Cobrado", placeholder="0,00")
-        status = st.text_input("Status")
+        status = st.selectbox("Status", status_options)
         motivo = st.text_input("Motivo do Atendimento")
 
     motivo_reagendamento = st.text_input("Motivo Reagendamento")
@@ -715,20 +800,20 @@ def render_visit_form() -> None:
             "Data": d.strftime("%d/%m/%Y"),
             "Início": inicio_txt.strip(),
             "Término": termino_txt.strip(),
-            "Modalidade": modalidade.strip(),
+            "Modalidade": modalidade,
             "Cliente": cliente.strip(),
-            "Consultor": consultor.strip(),
+            "Consultor": consultor,
             "UF": uf_clean,
             "Cidade": cidade.strip(),
-            "Técnico": tecnico.strip(),
+            "Técnico": tecnico,
             "Terceiro no local": terceiro.strip(),
-            "Tipo de Atendimento": tipo_atendimento.strip(),
-            "Equipamento": equipamento.strip(),
-            "Tipo de treinamento": tipo_treinamento.strip(),
-            "Sistema": sistema.strip(),
+            "Tipo de Atendimento": tipo_atendimento,
+            "Equipamento": equipamento,
+            "Tipo de treinamento": tipo_treinamento,
+            "Sistema": sistema,
             "Contratual": contratual,
             "Valor Cobrado": valor_txt.strip(),
-            "Status": status.strip(),
+            "Status": status,
             "Motivo do Atendimento": motivo.strip(),
             "Motivo Reagendamento": motivo_reagendamento.strip(),
             "Observação": observacao.strip(),
