@@ -736,6 +736,12 @@ def render_visit_form() -> None:
         "Equipamento",
         ("Emissor", "Player", "TV", "Totem", "Software"),
     )
+    contratual_options = sheet_column_options(
+        SPREADSHEET_ID,
+        TECH_VISITS_SHEET,
+        "Contratual",
+        ("Sim", "Não"),
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
         data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="visit_data_txt", max_chars=10, on_change=_on_data_change)
@@ -762,7 +768,7 @@ def render_visit_form() -> None:
         if tipo_atendimento.strip().casefold() == "treinamento":
             tipo_treinamento = st.selectbox("Tipo de treinamento", tipo_treinamento_options)
         sistema = st.selectbox("Sistema", sistema_options)
-        contratual = st.selectbox("Contratual", ["NÃO", "SIM"])
+        contratual = st.selectbox("Contratual", contratual_options)
     with c6:
         valor_txt = st.text_input("Valor Cobrado", placeholder="0,00")
         status = st.selectbox("Status", status_options)
@@ -813,7 +819,7 @@ def render_visit_form() -> None:
             "Equipamento": equipamento,
             "Tipo de treinamento": tipo_treinamento,
             "Sistema": sistema,
-            "Contratual": sim_nao_to_bool_text(contratual),
+            "Contratual": contratual,
             "Valor Cobrado": valor_txt.strip(),
             "Status": status,
             "Motivo do Atendimento": motivo.strip(),
