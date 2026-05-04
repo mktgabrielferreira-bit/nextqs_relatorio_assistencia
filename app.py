@@ -418,6 +418,10 @@ def sheet_column_options(
     return ([""] if include_blank else []) + list(fallback)
 
 
+def sim_nao_to_bool_text(value: str) -> str:
+    return "TRUE" if value == "SIM" else "FALSE"
+
+
 # =============================
 # Configs dos módulos
 # =============================
@@ -550,6 +554,8 @@ def _duration_hhmm(start_hhmm: str, end_hhmm: str) -> str:
 # Formulários
 # =============================
 def render_installation_form() -> None:
+    st.title("CADASTRAR INSTALAÇÃO")
+
     def _on_data_change():
         st.session_state.inst_data_txt = _mask_date_ddmmyyyy(st.session_state.get("inst_data_txt", ""))
 
@@ -642,11 +648,11 @@ def render_installation_form() -> None:
             "Consultor": consultor,
             "Cliente": cliente_txt.strip(),
             "Emissor de senhas": emissor_tipo,
-            "Emissor cliente": emissor_cliente,
+            "Emissor cliente": sim_nao_to_bool_text(emissor_cliente),
             "Emissores": int(emissores_qtd),
             "Quantidade Quiosque": int(emissores_qtd),
             "Player": player_tipo,
-            "Player cliente": player_cliente,
+            "Player cliente": sim_nao_to_bool_text(player_cliente),
             "Players": int(players_qtd),
             "Quantidade Players": int(players_qtd),
             "UF": uf_clean,
@@ -670,6 +676,8 @@ def render_installation_form() -> None:
 
 
 def render_visit_form() -> None:
+    st.title("CADASTRAR VISITA")
+
     def _on_data_change():
         st.session_state.visit_data_txt = _mask_date_ddmmyyyy(st.session_state.get("visit_data_txt", ""))
 
@@ -696,6 +704,7 @@ def render_visit_form() -> None:
         TECH_VISITS_SHEET,
         "Técnico",
         ("Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"),
+        include_blank=False,
     )
     tipo_atendimento_options = sheet_column_options(
         SPREADSHEET_ID,
@@ -727,13 +736,6 @@ def render_visit_form() -> None:
         "Equipamento",
         ("Emissor", "Player", "TV", "Totem", "Software"),
     )
-    contratual_options = sheet_column_options(
-        SPREADSHEET_ID,
-        TECH_VISITS_SHEET,
-        "Contratual",
-        ("Sim", "Não"),
-    )
-
     c1, c2, c3 = st.columns(3)
     with c1:
         data_txt = st.text_input("Data", placeholder="dd/mm/aaaa", key="visit_data_txt", max_chars=10, on_change=_on_data_change)
@@ -746,13 +748,13 @@ def render_visit_form() -> None:
     with c3:
         uf_txt = st.text_input("UF", placeholder="SP", max_chars=2)
         cidade = st.text_input("Cidade")
-        tecnico = st.selectbox("Técnico", tecnico_options)
+        tecnicos_sel = st.multiselect("Técnico(s)", tecnico_options, default=[])
 
     st.divider()
 
     c4, c5, c6 = st.columns(3)
     with c4:
-        terceiro = st.text_input("Terceiro no local")
+        terceiro = st.selectbox("Terceiro no local", ["NÃO", "SIM"])
         tipo_atendimento = st.selectbox("Tipo de Atendimento", tipo_atendimento_options)
         equipamento = st.selectbox("Equipamento", equipamento_options)
     with c5:
@@ -760,7 +762,7 @@ def render_visit_form() -> None:
         if tipo_atendimento.strip().casefold() == "treinamento":
             tipo_treinamento = st.selectbox("Tipo de treinamento", tipo_treinamento_options)
         sistema = st.selectbox("Sistema", sistema_options)
-        contratual = st.selectbox("Contratual", contratual_options)
+        contratual = st.selectbox("Contratual", ["NÃO", "SIM"])
     with c6:
         valor_txt = st.text_input("Valor Cobrado", placeholder="0,00")
         status = st.selectbox("Status", status_options)
@@ -805,13 +807,13 @@ def render_visit_form() -> None:
             "Consultor": consultor,
             "UF": uf_clean,
             "Cidade": cidade.strip(),
-            "Técnico": tecnico,
-            "Terceiro no local": terceiro.strip(),
+            "Técnico": ", ".join(tecnicos_sel) if tecnicos_sel else "",
+            "Terceiro no local": sim_nao_to_bool_text(terceiro),
             "Tipo de Atendimento": tipo_atendimento,
             "Equipamento": equipamento,
             "Tipo de treinamento": tipo_treinamento,
             "Sistema": sistema,
-            "Contratual": contratual,
+            "Contratual": sim_nao_to_bool_text(contratual),
             "Valor Cobrado": valor_txt.strip(),
             "Status": status,
             "Motivo do Atendimento": motivo.strip(),
@@ -832,6 +834,8 @@ def render_visit_form() -> None:
 # =============================
 def render_dashboard(module_key: str) -> None:
     cfg = MODULES[module_key]
+    st.title(cfg["item_label"].upper())
+
     df_raw = read_sheet(SPREADSHEET_ID, cfg["sheet"])
     if df_raw.empty:
         st.warning("A planilha não retornou dados.")
