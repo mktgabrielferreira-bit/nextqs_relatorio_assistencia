@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import gspread
@@ -15,6 +16,8 @@ from google.oauth2.service_account import Credentials
 COR1 = "#1896D8"
 COR2 = "#CC1B63"
 COR3 = "#342B38"
+BASE_DIR = Path(__file__).resolve().parent
+LOGO_PATH = BASE_DIR / "assets" / "nextqs_logo.png"
 
 st.set_page_config(page_title="NextQS Dashboard", layout="wide")
 
@@ -65,6 +68,10 @@ require_password()
 # =============================
 SCOPES_READONLY = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 SCOPES_READWRITE = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+class DuplicateRowError(RuntimeError):
+    pass
 
 
 def _get_gspread_client(scopes: list[str]):
@@ -128,6 +135,16 @@ def append_row_to_sheet(
     row = []
     for h in headers:
         row.append("" if values_by_header.get(h.strip()) is None else str(values_by_header.get(h.strip(), "")))
+
+    def _normalize_row(values: list[object]) -> list[str]:
+        return [str(v).strip() for v in values[: len(headers)] + [""] * max(0, len(headers) - len(values))]
+
+    new_row_norm = _normalize_row(row)
+    existing_rows = ws.get_all_values()[1:]
+    for existing in existing_rows:
+        existing_norm = _normalize_row(existing)
+        if any(existing_norm) and existing_norm == new_row_norm:
+            raise DuplicateRowError("Registro duplicado: uma linha igual ja existe na planilha.")
 
     col_a = ws.get(f"A2:A{ws.row_count}")
     if len(col_a) < (ws.row_count - 1):
@@ -468,7 +485,7 @@ MODULES = {
 # Estado / Navegação
 # =============================
 if "view_mode" not in st.session_state:
-    st.session_state.view_mode = "INSTALAÇÕES"
+    st.session_state.view_mode = "GERAL"
 
 SPREADSHEET_ID = st.secrets.get("spreadsheet_id", "")
 if not SPREADSHEET_ID:
@@ -476,14 +493,17 @@ if not SPREADSHEET_ID:
     st.stop()
 
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    if st.button("GERAL", use_container_width=True):
+        st.session_state.view_mode = "GERAL"
     if st.button("INSTALAÇÕES", use_container_width=True):
         st.session_state.view_mode = "INSTALAÇÕES"
     if st.button("VISITAS TÉCNICAS", use_container_width=True):
         st.session_state.view_mode = "VISITAS TÉCNICAS"
-    if st.button("CADASTRAR INSTALAÇÃO", use_container_width=True):
-        st.session_state.view_mode = "CADASTRAR INSTALAÇÃO"
-    if st.button("CADASTRAR VISITA", use_container_width=True):
-        st.session_state.view_mode = "CADASTRAR VISITA"
+    if st.button("CADASTRAR", use_container_width=True):
+        st.session_state.view_mode = "CADASTRAR"
     st.divider()
 
 
@@ -553,8 +573,11 @@ def _duration_hhmm(start_hhmm: str, end_hhmm: str) -> str:
 # =============================
 # Formulários
 # =============================
-def render_installation_form() -> None:
-    st.title("CADASTRAR INSTALAÇÃO")
+def render_installation_form(show_title: bool = True) -> None:
+    if show_title:
+        st.title("CADASTRAR INSTALAÇÃO")
+    else:
+        st.subheader("INSTALAÇÃO")
 
     def _on_data_change():
         st.session_state.inst_data_txt = _mask_date_ddmmyyyy(st.session_state.get("inst_data_txt", ""))
@@ -671,12 +694,17 @@ def render_installation_form() -> None:
         try:
             append_row_to_sheet(SPREADSHEET_ID, INSTALLATIONS_SHEET, values_by_header)
             st.success("✅ Registro salvo na planilha!")
+        except DuplicateRowError as ex:
+            st.warning(str(ex))
         except Exception as ex:
             st.error(f"Não foi possível salvar na planilha: {ex}")
 
 
-def render_visit_form() -> None:
-    st.title("CADASTRAR VISITA")
+def render_visit_form(show_title: bool = True) -> None:
+    if show_title:
+        st.title("CADASTRAR VISITA")
+    else:
+        st.subheader("VISITA")
 
     def _on_data_change():
         st.session_state.visit_data_txt = _mask_date_ddmmyyyy(st.session_state.get("visit_data_txt", ""))
@@ -831,8 +859,161 @@ def render_visit_form() -> None:
         try:
             append_row_to_sheet(SPREADSHEET_ID, TECH_VISITS_SHEET, values_by_header)
             st.success("✅ Registro salvo na planilha!")
+        except DuplicateRowError as ex:
+            st.warning(str(ex))
         except Exception as ex:
             st.error(f"Não foi possível salvar na planilha: {ex}")
+
+
+def render_register_page() -> None:
+    st.title("CADASTRAR")
+    register_type = st.radio(
+        "Tipo de cadastro",
+        ["VISITA", "INSTALAÇÃO"],
+        horizontal=True,
+        key="register_type",
+    )
+    st.divider()
+
+    if register_type == "VISITA":
+        render_visit_form(show_title=False)
+    else:
+        render_installation_form(show_title=False)
+
+
+def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, object]:
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
+
+    status_col = first_existing_col(df, cfg["status_col_candidates"])
+    value_col = str(cfg["value_col"])
+    item_label = str(cfg["item_label"])
+
+    concluidas = int(df[status_col].map(is_concluido).sum()) if status_col else 0
+    mins = df["Duração"].map(_parse_duration_to_minutes).dropna() if safe_col(df, "Duração") else pd.Series(dtype=float)
+    tempo_medio_str = format_minutes_pt(mins.mean()) if not mins.empty else "—"
+    modalidade_mais_comum = mode_value(df["Modalidade"]) if safe_col(df, "Modalidade") else "—"
+    reag_rate = float(df[status_col].map(is_reagendar).mean()) if status_col and len(df) else None
+    taxa_reag = f"{reag_rate*100:.1f}%" if reag_rate is not None else "—"
+    taxa_reag_color = COR2 if (reag_rate is not None and reag_rate >= 0.26) else COR1
+
+    valores = df[value_col].map(parse_brl_money).dropna() if safe_col(df, value_col) else pd.Series(dtype=float)
+    faturamento_total = float(valores.sum()) if not valores.empty else 0.0
+    total_minutes_sum = float(mins.sum()) if not mins.empty else 0.0
+    horas_totais = total_minutes_sum / 60.0 if total_minutes_sum else 0.0
+    valor_por_hora = (faturamento_total / horas_totais) if horas_totais > 0 else None
+
+    cliente_mais = "—"
+    if safe_col(df, "Cliente"):
+        tmpc = df["Cliente"].map(cliente_base)
+        tmpc = tmpc.dropna().astype(str).str.strip()
+        tmpc = tmpc[tmpc != ""]
+        if not tmpc.empty:
+            cliente_mais = tmpc.value_counts().index[0]
+
+    return {
+        "item_label": item_label,
+        "concluidas": concluidas,
+        "tempo_medio": tempo_medio_str,
+        "modalidade_mais_comum": modalidade_mais_comum,
+        "taxa_reag": taxa_reag,
+        "taxa_reag_color": taxa_reag_color,
+        "faturamento_total": faturamento_total,
+        "horas_totais": horas_totais,
+        "valor_por_hora": valor_por_hora,
+        "cliente_mais": cliente_mais,
+    }
+
+
+def render_highlight_cards(df_raw: pd.DataFrame, cfg: dict[str, object]) -> None:
+    metrics = _module_metrics(df_raw, cfg)
+    item_label = str(metrics["item_label"])
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        kpi_card(f"{item_label} Concluídas", str(metrics["concluidas"]), COR1)
+    with k2:
+        kpi_card("Tempo Médio", str(metrics["tempo_medio"]), COR1)
+    with k3:
+        kpi_card("Modalidade mais comum", str(metrics["modalidade_mais_comum"]), COR1)
+    with k4:
+        kpi_card("Taxa de Reagendamentos", str(metrics["taxa_reag"]), str(metrics["taxa_reag_color"]))
+
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+    k5, k6, k7, k8 = st.columns(4)
+    with k5:
+        kpi_card("Faturamento Total", format_currency_brl(float(metrics["faturamento_total"])), COR1)
+    with k6:
+        horas_totais = float(metrics["horas_totais"])
+        kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", COR1)
+    with k7:
+        valor_por_hora = metrics["valor_por_hora"]
+        kpi_card("Valor por Hora", format_currency_brl(float(valor_por_hora)) if valor_por_hora is not None else "—", COR1)
+    with k8:
+        kpi_card(f"Cliente com mais {item_label.lower()}", str(metrics["cliente_mais"]), COR1)
+
+
+def render_average_time_by_modality(df_raw: pd.DataFrame, item_label: str) -> None:
+    if df_raw.empty or not safe_col(df_raw, "Modalidade") or not safe_col(df_raw, "Duração"):
+        st.info("Sem dados suficientes para calcular o tempo médio por modalidade.")
+        return
+
+    df = df_raw.copy()
+    df["_minutos"] = df["Duração"].map(_parse_duration_to_minutes)
+    df["_modalidade"] = df["Modalidade"].fillna("").astype(str).str.strip()
+    df = df[(df["_modalidade"] != "") & df["_minutos"].notna()]
+    if df.empty:
+        st.info("Sem durações válidas para calcular o tempo médio por modalidade.")
+        return
+
+    avg = (
+        df.groupby("_modalidade", dropna=False)["_minutos"]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index()
+        .rename(columns={"_modalidade": "Modalidade", "_minutos": "Minutos"})
+    )
+    avg["Tempo médio"] = avg["Minutos"].map(format_minutes_pt)
+
+    fig = px.bar(
+        avg,
+        x="Modalidade",
+        y="Minutos",
+        text="Tempo médio",
+        template="plotly_dark",
+        color_discrete_sequence=[COR1],
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_layout(
+        height=340,
+        margin=dict(l=20, r=20, t=20, b=60),
+        xaxis_title="",
+        yaxis_title=f"Tempo médio de {item_label.lower()} (min)",
+    )
+    fig.update_xaxes(tickangle=-25)
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(avg[["Modalidade", "Tempo médio"]], use_container_width=True, hide_index=True)
+
+
+def render_general_dashboard() -> None:
+    st.title("GERAL")
+
+    for module_key in ["INSTALAÇÕES", "VISITAS TÉCNICAS"]:
+        cfg = MODULES[module_key]
+        item_label = str(cfg["item_label"])
+        st.subheader(item_label)
+
+        df_raw = read_sheet(SPREADSHEET_ID, cfg["sheet"])
+        if df_raw.empty:
+            st.warning(f"A planilha de {item_label.lower()} não retornou dados.")
+        else:
+            render_highlight_cards(df_raw, cfg)
+            st.subheader("Tempo Médio por Modalidade")
+            render_average_time_by_modality(df_raw, item_label)
+
+        if module_key != "VISITAS TÉCNICAS":
+            st.divider()
 
 
 # =============================
@@ -1142,12 +1323,12 @@ def render_dashboard(module_key: str) -> None:
 # Render final
 # =============================
 mode = st.session_state.view_mode
-if mode == "CADASTRAR INSTALAÇÃO":
-    render_installation_form()
-elif mode == "CADASTRAR VISITA":
-    render_visit_form()
+if mode == "GERAL":
+    render_general_dashboard()
+elif mode == "CADASTRAR":
+    render_register_page()
 elif mode in MODULES:
     render_dashboard(mode)
 else:
-    st.session_state.view_mode = "INSTALAÇÕES"
+    st.session_state.view_mode = "GERAL"
     st.rerun()
