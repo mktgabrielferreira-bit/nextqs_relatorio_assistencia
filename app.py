@@ -976,37 +976,147 @@ def render_average_time_by_modality(df_raw: pd.DataFrame, item_label: str) -> No
     )
     avg["Tempo médio"] = avg["Minutos"].map(format_minutes_pt)
 
-    fig = px.bar(
-        avg,
-        x="Modalidade",
-        y="Minutos",
-        text="Tempo médio",
-        template="plotly_dark",
-        color_discrete_sequence=[COR1],
-    )
-    fig.update_traces(textposition="outside", cliponaxis=False)
-    fig.update_layout(
-        height=340,
-        margin=dict(l=20, r=20, t=20, b=60),
-        xaxis_title="",
-        yaxis_title=f"Tempo médio de {item_label.lower()} (min)",
-    )
-    fig.update_xaxes(tickangle=-25)
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(avg[["Modalidade", "Tempo médio"]], use_container_width=True, hide_index=True)
+    cols_per_row = 4
+    for start in range(0, len(avg), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col, (_, row) in zip(cols, avg.iloc[start : start + cols_per_row].iterrows()):
+            with col:
+                kpi_card(str(row["Modalidade"]), str(row["Tempo médio"]), COR1)
+
+
+def _prepare_general_df(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
+    df["_data"] = to_date_series(df["Data"]) if safe_col(df, "Data") else pd.NaT
+    if safe_col(df, "Cliente"):
+        df["_cliente_base"] = df["Cliente"].map(cliente_base)
+    return df
+
+
+def _general_options(dfs: list[pd.DataFrame], col: str) -> list[str]:
+    values = []
+    for df in dfs:
+        if safe_col(df, col):
+            values.extend(df[col].dropna().astype(str).str.strip().tolist())
+    return sorted({v for v in values if v})
+
+
+def _general_people_options(dfs: list[pd.DataFrame], candidates: list[str], split_values: bool = False) -> list[str]:
+    values = []
+    for df in dfs:
+        col = first_existing_col(df, candidates)
+        if not col:
+            continue
+        if split_values:
+            values.extend(df[col].map(split_tecnicos).explode().dropna().astype(str).str.strip().tolist())
+        else:
+            values.extend(df[col].dropna().astype(str).str.strip().tolist())
+    return sorted({v for v in values if v})
+
+
+def _apply_general_filters(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFrame:
+    df_f = df.copy()
+
+    if df_f["_data"].notna().any():
+        period_option = filters["period_option"]
+        if period_option == "Este mês":
+            today_date = pd.Timestamp.today().date()
+            df_f = df_f[(df_f["_data"].dt.year == int(today_date.year)) & (df_f["_data"].dt.month == int(today_date.month))]
+        elif period_option == "Este ano":
+            today_date = pd.Timestamp.today().date()
+            df_f = df_f[df_f["_data"].dt.year == int(today_date.year)]
+        else:
+            sel_custom_year = filters.get("sel_custom_year")
+            sel_custom_month = filters.get("sel_custom_month")
+            if sel_custom_year is not None and sel_custom_month is not None:
+                month = int(str(sel_custom_month).split("-")[0].strip())
+                df_f = df_f[(df_f["_data"].dt.year == int(sel_custom_year)) & (df_f["_data"].dt.month == month)]
+
+    df_f = apply_multiselect(df_f, "Modalidade", filters["sel_modalidade"])
+    df_f = apply_multiselect(df_f, "UF", filters["sel_uf"])
+    df_f = apply_multiselect(df_f, "Cidade", filters["sel_cidade"])
+
+    sel_cliente = filters["sel_cliente"]
+    if sel_cliente and safe_col(df_f, "_cliente_base"):
+        df_f = df_f[df_f["_cliente_base"].astype(str).isin([str(x) for x in sel_cliente])]
+
+    tecnico_col = first_existing_col(df_f, ["Técnico", "Tecnico", "Técnicos", "Tecnicos"])
+    sel_tecnico = filters["sel_tecnico"]
+    if tecnico_col and sel_tecnico:
+        sel_set = set(str(x).strip() for x in sel_tecnico if str(x).strip())
+        df_f = df_f[df_f[tecnico_col].map(lambda v: bool(set(split_tecnicos(v)) & sel_set))]
+
+    consultor_col = first_existing_col(df_f, ["Consultor", "Consultores", "Consultor(a)"])
+    sel_consultor = filters["sel_consultor"]
+    if consultor_col and sel_consultor:
+        df_f = apply_multiselect(df_f, consultor_col, sel_consultor)
+
+    return df_f
 
 
 def render_general_dashboard() -> None:
-    st.title("GERAL")
+    prepared = {}
+    for module_key in ["INSTALAÇÕES", "VISITAS TÉCNICAS"]:
+        cfg = MODULES[module_key]
+        prepared[module_key] = _prepare_general_df(read_sheet(SPREADSHEET_ID, cfg["sheet"]))
+
+    dfs = list(prepared.values())
+    valid_dates = pd.concat([df["_data"].dropna() for df in dfs if safe_col(df, "_data")], ignore_index=True)
+
+    with st.sidebar:
+        st.header("Filtros")
+        period_option = st.radio("Período", ["Este mês", "Este ano", "Personalizado"], index=0, key="general_period")
+
+        sel_custom_year = None
+        sel_custom_month = None
+        if period_option == "Personalizado" and not valid_dates.empty:
+            years = sorted(valid_dates.dt.year.unique().tolist())
+            data_ref_dt = valid_dates.max()
+            year_default = int(data_ref_dt.year) if int(data_ref_dt.year) in years else years[-1]
+            sel_custom_year = st.selectbox("Ano", options=years, index=years.index(year_default), key="general_year")
+            months_avail = sorted([int(m) for m in valid_dates[valid_dates.dt.year == sel_custom_year].dt.month.unique().tolist()])
+            month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+            month_options = [f"{m:02d} - {month_names[m-1]}" for m in months_avail]
+            default_month = int(data_ref_dt.month) if int(data_ref_dt.month) in months_avail else months_avail[-1]
+            sel_custom_month = st.selectbox("Mês", options=month_options, index=months_avail.index(default_month), key="general_month")
+
+        with st.expander("Filtros avançados", expanded=False):
+            sel_modalidade = st.multiselect("Modalidade", options=_general_options(dfs, "Modalidade"), key="general_modalidade")
+            sel_uf = st.multiselect("UF", options=_general_options(dfs, "UF"), key="general_uf")
+            sel_cidade = st.multiselect("Cidade", options=_general_options(dfs, "Cidade"), key="general_cidade")
+            cliente_opts = sorted({v for df in dfs if safe_col(df, "_cliente_base") for v in df["_cliente_base"].dropna().astype(str).str.strip().tolist() if v})
+            sel_cliente = st.multiselect("Cliente", options=cliente_opts, key="general_cliente")
+            sel_tecnico = st.multiselect(
+                "Técnico",
+                options=_general_people_options(dfs, ["Técnico", "Tecnico", "Técnicos", "Tecnicos"], split_values=True),
+                key="general_tecnico",
+            )
+            sel_consultor = st.multiselect(
+                "Consultor",
+                options=_general_people_options(dfs, ["Consultor", "Consultores", "Consultor(a)"]),
+                key="general_consultor",
+            )
+
+    filters = {
+        "period_option": period_option,
+        "sel_custom_year": sel_custom_year,
+        "sel_custom_month": sel_custom_month,
+        "sel_modalidade": sel_modalidade,
+        "sel_uf": sel_uf,
+        "sel_cidade": sel_cidade,
+        "sel_cliente": sel_cliente,
+        "sel_tecnico": sel_tecnico,
+        "sel_consultor": sel_consultor,
+    }
 
     for module_key in ["INSTALAÇÕES", "VISITAS TÉCNICAS"]:
         cfg = MODULES[module_key]
         item_label = str(cfg["item_label"])
         st.subheader(item_label)
 
-        df_raw = read_sheet(SPREADSHEET_ID, cfg["sheet"])
+        df_raw = _apply_general_filters(prepared[module_key], filters)
         if df_raw.empty:
-            st.warning(f"A planilha de {item_label.lower()} não retornou dados.")
+            st.warning(f"Nenhum registro de {item_label.lower()} encontrado para os filtros selecionados.")
         else:
             render_highlight_cards(df_raw, cfg)
             st.subheader("Tempo Médio por Modalidade")
