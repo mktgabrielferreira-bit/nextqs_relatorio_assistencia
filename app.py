@@ -595,7 +595,7 @@ def render_installation_form(show_title: bool = True) -> None:
         termino_txt = st.text_input("Término", placeholder="hh:mm", key="inst_termino_txt", max_chars=5, on_change=_on_termino_change)
     with c2:
         modalidade = st.selectbox("Modalidade", ["Remota", "Presencial", "Híbrida", "Evento", "Apresentação", "Boas-vindas"])
-        consultor = st.selectbox("Consultor", ["Shimada", "André", "Jefferson", "Sandro", "Renato"])
+        consultor = st.selectbox("Consultor", ["Shimada", "André", "Jefferson", "Sandro", "Renato", "Tiago"])
         tecnicos_sel = st.multiselect("Técnico(s)", ["Davi", "Vinícius", "Marcos", "Ryen", "Jonathan", "Renato", "Fábio"], default=[])
     with c3:
         status = st.selectbox("Status", ["Concluído", "Cancelado", "Reagendar"])
