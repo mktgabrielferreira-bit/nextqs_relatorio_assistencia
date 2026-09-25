@@ -360,10 +360,10 @@ def modality_card(label: str, average_time: str, quantity: int) -> None:
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.06);">
             <div style="font-size: 15px; font-weight: 700; margin-bottom: 10px;">{escape(label)}</div>
-            <div style="font-size: 18px; line-height: 1.45;">
+            <div style="font-size: 16px; line-height: 1.45; white-space: nowrap;">
                 Tempo Médio: <strong style="color: {COR1};">{escape(average_time)}</strong>
             </div>
-            <div style="font-size: 18px; line-height: 1.45;">
+            <div style="font-size: 16px; line-height: 1.45; white-space: nowrap;">
                 QTD: <strong style="color: {COR1};">{quantity}</strong>
             </div>
         </div>
@@ -588,12 +588,12 @@ with st.sidebar:
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     if st.button("GERAL", use_container_width=True):
         st.session_state.view_mode = "GERAL"
-    if st.button("INSTALAÇÕES", use_container_width=True):
-        st.session_state.view_mode = "INSTALAÇÕES"
-    if st.button("ATENDIMENTOS TÉCNICOS", use_container_width=True):
-        st.session_state.view_mode = "ATENDIMENTOS TÉCNICOS"
     if st.button("TIFLUX", use_container_width=True):
         st.session_state.view_mode = "TIFLUX"
+    if st.button("INSTALAÇÕES", use_container_width=True):
+        st.session_state.view_mode = "INSTALAÇÕES"
+    if st.button("ATENDIMENTO", use_container_width=True):
+        st.session_state.view_mode = "ATENDIMENTOS TÉCNICOS"
     if st.button("CADASTRAR", use_container_width=True):
         st.session_state.view_mode = "CADASTRAR"
     st.divider()
@@ -1073,6 +1073,8 @@ def render_average_time_by_modality(df_raw: pd.DataFrame, item_label: str) -> No
 
     cols_per_row = 4
     for start in range(0, len(summary), cols_per_row):
+        if start > 0:
+            st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
         cols = st.columns(cols_per_row)
         for col, (_, row) in zip(cols, summary.iloc[start : start + cols_per_row].iterrows()):
             with col:
