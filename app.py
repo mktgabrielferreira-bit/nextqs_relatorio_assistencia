@@ -457,10 +457,35 @@ def render_period_filter(valid_dates: pd.Series, key_prefix: str) -> tuple[str, 
         today_date = pd.Timestamp.today().date()
         default_start = dates.min().date() if not dates.empty else today_date
         default_end = dates.max().date() if not dates.empty else today_date
-        start_date = st.date_input("Data inicial", value=default_start, key=f"{key_prefix}_start_date")
-        end_date = st.date_input("Data final", value=default_end, key=f"{key_prefix}_end_date")
-        if start_date > end_date:
-            st.error("A data inicial deve ser anterior ou igual à data final.")
+        selected_start_date = st.date_input(
+            "Data inicial",
+            value=default_start,
+            format="DD/MM/YYYY",
+            key=f"{key_prefix}_start_date",
+        )
+        selected_end_date = st.date_input(
+            "Data final",
+            value=default_end,
+            format="DD/MM/YYYY",
+            key=f"{key_prefix}_end_date",
+        )
+
+        applied_start_key = f"{key_prefix}_applied_start_date"
+        applied_end_key = f"{key_prefix}_applied_end_date"
+        if applied_start_key not in st.session_state:
+            st.session_state[applied_start_key] = default_start
+        if applied_end_key not in st.session_state:
+            st.session_state[applied_end_key] = default_end
+
+        if st.button("Filtrar", use_container_width=True, key=f"{key_prefix}_apply_period"):
+            if selected_start_date > selected_end_date:
+                st.error("A data inicial deve ser anterior ou igual à data final.")
+            else:
+                st.session_state[applied_start_key] = selected_start_date
+                st.session_state[applied_end_key] = selected_end_date
+
+        start_date = st.session_state.get(applied_start_key)
+        end_date = st.session_state.get(applied_end_key)
 
     return period_option, start_date, end_date
 
