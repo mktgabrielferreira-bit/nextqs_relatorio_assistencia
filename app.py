@@ -592,7 +592,7 @@ with st.sidebar:
         st.session_state.view_mode = "TIFLUX"
     if st.button("INSTALAÇÕES", use_container_width=True):
         st.session_state.view_mode = "INSTALAÇÕES"
-    if st.button("ATENDIMENTO", use_container_width=True):
+    if st.button("ATENDIMENTOS", use_container_width=True):
         st.session_state.view_mode = "ATENDIMENTOS TÉCNICOS"
     if st.button("CADASTRAR", use_container_width=True):
         st.session_state.view_mode = "CADASTRAR"
