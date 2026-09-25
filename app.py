@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 from typing import Optional
 
@@ -183,6 +184,18 @@ def to_date_series(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s.astype(str).str.strip(), dayfirst=True, errors="coerce")
 
 
+def to_datetime_series(s: pd.Series) -> pd.Series:
+    if s is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    text = s.astype(str).str.strip()
+    iso_mask = text.str.match(r"^\d{4}-\d{2}-\d{2}")
+    parsed = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    parsed.loc[iso_mask] = pd.to_datetime(text.loc[iso_mask], yearfirst=True, errors="coerce")
+    parsed.loc[~iso_mask] = pd.to_datetime(text.loc[~iso_mask], dayfirst=True, errors="coerce")
+    return parsed
+
+
 def parse_brl_money(value) -> Optional[float]:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -337,6 +350,28 @@ def kpi_card(label: str, value: str, color: str = COR1) -> None:
     )
 
 
+def modality_card(label: str, average_time: str, quantity: int) -> None:
+    st.markdown(
+        f"""
+        <div style="
+            padding: 12px 14px;
+            min-height: 118px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);">
+            <div style="font-size: 15px; font-weight: 700; margin-bottom: 10px;">{escape(label)}</div>
+            <div style="font-size: 18px; line-height: 1.45;">
+                Tempo Médio: <strong style="color: {COR1};">{escape(average_time)}</strong>
+            </div>
+            <div style="font-size: 18px; line-height: 1.45;">
+                QTD: <strong style="color: {COR1};">{quantity}</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def bar_chart_counts(series: pd.Series, top_n: int, y_label: str) -> None:
     s = series.dropna().astype(str).str.strip()
     counts = s.value_counts().head(top_n)
@@ -407,6 +442,56 @@ def apply_multiselect(df_in: pd.DataFrame, col: str, selected: list[str]) -> pd.
     return df_in[df_in[col].astype(str).isin(selected)]
 
 
+def render_period_filter(valid_dates: pd.Series, key_prefix: str) -> tuple[str, object, object]:
+    period_option = st.radio(
+        "Período",
+        ["Este mês", "Este ano", "Personalizado"],
+        index=0,
+        key=f"{key_prefix}_period",
+    )
+    start_date = None
+    end_date = None
+
+    if period_option == "Personalizado":
+        dates = pd.to_datetime(valid_dates, errors="coerce").dropna()
+        today_date = pd.Timestamp.today().date()
+        default_start = dates.min().date() if not dates.empty else today_date
+        default_end = dates.max().date() if not dates.empty else today_date
+        start_date = st.date_input("Data inicial", value=default_start, key=f"{key_prefix}_start_date")
+        end_date = st.date_input("Data final", value=default_end, key=f"{key_prefix}_end_date")
+        if start_date > end_date:
+            st.error("A data inicial deve ser anterior ou igual à data final.")
+
+    return period_option, start_date, end_date
+
+
+def apply_period_filter(
+    df_in: pd.DataFrame,
+    date_col: str,
+    period_option: str,
+    start_date: object = None,
+    end_date: object = None,
+) -> pd.DataFrame:
+    if date_col not in df_in.columns or not df_in[date_col].notna().any():
+        return df_in
+
+    df_out = df_in.copy()
+    dates = pd.to_datetime(df_out[date_col], errors="coerce")
+    today_date = pd.Timestamp.today().date()
+    if period_option == "Este mês":
+        mask = (dates.dt.year == today_date.year) & (dates.dt.month == today_date.month)
+    elif period_option == "Este ano":
+        mask = dates.dt.year == today_date.year
+    elif start_date is not None and end_date is not None:
+        if start_date > end_date:
+            return df_out.iloc[0:0]
+        mask = (dates.dt.date >= start_date) & (dates.dt.date <= end_date)
+    else:
+        mask = pd.Series(True, index=df_out.index)
+
+    return df_out[mask]
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def sheet_column_options(
     spreadsheet_id: str,
@@ -444,6 +529,7 @@ def sim_nao_to_bool_text(value: str) -> str:
 # =============================
 INSTALLATIONS_SHEET = "Instalacoes_2026"
 TECH_VISITS_SHEET = "Atendimentos_Tecnicos_2026"
+TIFLUX_CHAT_SHEET = "Tiflux_Chat"
 
 MODULES = {
     "INSTALAÇÕES": {
@@ -451,6 +537,8 @@ MODULES = {
         "kind": "instalacoes",
         "item_label": "Instalações",
         "item_singular": "Instalação",
+        "completed_label": "Instalações Concluídas",
+        "plural_article": "das",
         "value_col": "Valor da instalação",
         "status_col_candidates": ["Status", "Status da Instalação", "Status Instalação", "Situacao", "Situação"],
         "reason_col_candidates": [
@@ -463,11 +551,13 @@ MODULES = {
         "extra_filter_candidates": [("Plano", ["Plano"])],
         "csv_name": "relatorio_instalacoes_filtrado.csv",
     },
-    "VISITAS TÉCNICAS": {
+    "ATENDIMENTOS TÉCNICOS": {
         "sheet": TECH_VISITS_SHEET,
         "kind": "visitas",
-        "item_label": "Visitas Técnicas",
-        "item_singular": "Visita Técnica",
+        "item_label": "Atendimentos Técnicos",
+        "item_singular": "Atendimento Técnico",
+        "completed_label": "Atendimentos Técnicos Concluídos",
+        "plural_article": "dos",
         "value_col": "Valor Cobrado",
         "status_col_candidates": ["Status"],
         "reason_col_candidates": ["Motivo do Atendimento", "Motivo Reagendamento", "Motivo"],
@@ -476,7 +566,7 @@ MODULES = {
             ("Sistema", ["Sistema"]),
             ("Contratual", ["Contratual"]),
         ],
-        "csv_name": "relatorio_visitas_tecnicas_filtrado.csv",
+        "csv_name": "relatorio_atendimentos_tecnicos_filtrado.csv",
     },
 }
 
@@ -500,8 +590,10 @@ with st.sidebar:
         st.session_state.view_mode = "GERAL"
     if st.button("INSTALAÇÕES", use_container_width=True):
         st.session_state.view_mode = "INSTALAÇÕES"
-    if st.button("VISITAS TÉCNICAS", use_container_width=True):
-        st.session_state.view_mode = "VISITAS TÉCNICAS"
+    if st.button("ATENDIMENTOS TÉCNICOS", use_container_width=True):
+        st.session_state.view_mode = "ATENDIMENTOS TÉCNICOS"
+    if st.button("TIFLUX", use_container_width=True):
+        st.session_state.view_mode = "TIFLUX"
     if st.button("CADASTRAR", use_container_width=True):
         st.session_state.view_mode = "CADASTRAR"
     st.divider()
@@ -702,9 +794,9 @@ def render_installation_form(show_title: bool = True) -> None:
 
 def render_visit_form(show_title: bool = True) -> None:
     if show_title:
-        st.title("CADASTRAR VISITA")
+        st.title("CADASTRAR ATENDIMENTO TÉCNICO")
     else:
-        st.subheader("VISITA")
+        st.subheader("ATENDIMENTO TÉCNICO")
 
     def _on_data_change():
         st.session_state.visit_data_txt = _mask_date_ddmmyyyy(st.session_state.get("visit_data_txt", ""))
@@ -869,13 +961,13 @@ def render_register_page() -> None:
     st.title("CADASTRAR")
     register_type = st.radio(
         "Tipo de cadastro",
-        ["VISITA", "INSTALAÇÃO"],
+        ["ATENDIMENTO TÉCNICO", "INSTALAÇÃO"],
         horizontal=True,
         key="register_type",
     )
     st.divider()
 
-    if register_type == "VISITA":
+    if register_type == "ATENDIMENTO TÉCNICO":
         render_visit_form(show_title=False)
     else:
         render_installation_form(show_title=False)
@@ -888,6 +980,7 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
     status_col = first_existing_col(df, cfg["status_col_candidates"])
     value_col = str(cfg["value_col"])
     item_label = str(cfg["item_label"])
+    completed_label = str(cfg["completed_label"])
 
     concluidas = int(df[status_col].map(is_concluido).sum()) if status_col else 0
     mins = df["Duração"].map(_parse_duration_to_minutes).dropna() if safe_col(df, "Duração") else pd.Series(dtype=float)
@@ -913,6 +1006,7 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
 
     return {
         "item_label": item_label,
+        "completed_label": completed_label,
         "concluidas": concluidas,
         "tempo_medio": tempo_medio_str,
         "modalidade_mais_comum": modalidade_mais_comum,
@@ -928,10 +1022,11 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
 def render_highlight_cards(df_raw: pd.DataFrame, cfg: dict[str, object]) -> None:
     metrics = _module_metrics(df_raw, cfg)
     item_label = str(metrics["item_label"])
+    completed_label = str(metrics["completed_label"])
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        kpi_card(f"{item_label} Concluídas", str(metrics["concluidas"]), COR1)
+        kpi_card(completed_label, str(metrics["concluidas"]), COR1)
     with k2:
         kpi_card("Tempo Médio", str(metrics["tempo_medio"]), COR1)
     with k3:
@@ -962,26 +1057,26 @@ def render_average_time_by_modality(df_raw: pd.DataFrame, item_label: str) -> No
     df = df_raw.copy()
     df["_minutos"] = df["Duração"].map(_parse_duration_to_minutes)
     df["_modalidade"] = df["Modalidade"].fillna("").astype(str).str.strip()
-    df = df[(df["_modalidade"] != "") & df["_minutos"].notna()]
+    df = df[df["_modalidade"] != ""]
     if df.empty:
-        st.info("Sem durações válidas para calcular o tempo médio por modalidade.")
+        st.info("Sem modalidades preenchidas para exibir.")
         return
 
-    avg = (
-        df.groupby("_modalidade", dropna=False)["_minutos"]
-        .mean()
-        .sort_values(ascending=False)
+    summary = (
+        df.groupby("_modalidade", dropna=False)
+        .agg(Minutos=("_minutos", "mean"), QTD=("_modalidade", "size"))
+        .sort_values(["QTD", "Minutos"], ascending=[False, False])
         .reset_index()
-        .rename(columns={"_modalidade": "Modalidade", "_minutos": "Minutos"})
+        .rename(columns={"_modalidade": "Modalidade"})
     )
-    avg["Tempo médio"] = avg["Minutos"].map(format_minutes_pt)
+    summary["Tempo médio"] = summary["Minutos"].map(format_minutes_pt)
 
     cols_per_row = 4
-    for start in range(0, len(avg), cols_per_row):
+    for start in range(0, len(summary), cols_per_row):
         cols = st.columns(cols_per_row)
-        for col, (_, row) in zip(cols, avg.iloc[start : start + cols_per_row].iterrows()):
+        for col, (_, row) in zip(cols, summary.iloc[start : start + cols_per_row].iterrows()):
             with col:
-                kpi_card(str(row["Modalidade"]), str(row["Tempo médio"]), COR1)
+                modality_card(str(row["Modalidade"]), str(row["Tempo médio"]), int(row["QTD"]))
 
 
 def _prepare_general_df(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -1015,22 +1110,13 @@ def _general_people_options(dfs: list[pd.DataFrame], candidates: list[str], spli
 
 
 def _apply_general_filters(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFrame:
-    df_f = df.copy()
-
-    if df_f["_data"].notna().any():
-        period_option = filters["period_option"]
-        if period_option == "Este mês":
-            today_date = pd.Timestamp.today().date()
-            df_f = df_f[(df_f["_data"].dt.year == int(today_date.year)) & (df_f["_data"].dt.month == int(today_date.month))]
-        elif period_option == "Este ano":
-            today_date = pd.Timestamp.today().date()
-            df_f = df_f[df_f["_data"].dt.year == int(today_date.year)]
-        else:
-            sel_custom_year = filters.get("sel_custom_year")
-            sel_custom_month = filters.get("sel_custom_month")
-            if sel_custom_year is not None and sel_custom_month is not None:
-                month = int(str(sel_custom_month).split("-")[0].strip())
-                df_f = df_f[(df_f["_data"].dt.year == int(sel_custom_year)) & (df_f["_data"].dt.month == month)]
+    df_f = apply_period_filter(
+        df,
+        "_data",
+        str(filters["period_option"]),
+        filters.get("start_date"),
+        filters.get("end_date"),
+    )
 
     df_f = apply_multiselect(df_f, "Modalidade", filters["sel_modalidade"])
     df_f = apply_multiselect(df_f, "UF", filters["sel_uf"])
@@ -1056,7 +1142,7 @@ def _apply_general_filters(df: pd.DataFrame, filters: dict[str, object]) -> pd.D
 
 def render_general_dashboard() -> None:
     prepared = {}
-    for module_key in ["INSTALAÇÕES", "VISITAS TÉCNICAS"]:
+    for module_key in ["INSTALAÇÕES", "ATENDIMENTOS TÉCNICOS"]:
         cfg = MODULES[module_key]
         prepared[module_key] = _prepare_general_df(read_sheet(SPREADSHEET_ID, cfg["sheet"]))
 
@@ -1065,20 +1151,7 @@ def render_general_dashboard() -> None:
 
     with st.sidebar:
         st.header("Filtros")
-        period_option = st.radio("Período", ["Este mês", "Este ano", "Personalizado"], index=0, key="general_period")
-
-        sel_custom_year = None
-        sel_custom_month = None
-        if period_option == "Personalizado" and not valid_dates.empty:
-            years = sorted(valid_dates.dt.year.unique().tolist())
-            data_ref_dt = valid_dates.max()
-            year_default = int(data_ref_dt.year) if int(data_ref_dt.year) in years else years[-1]
-            sel_custom_year = st.selectbox("Ano", options=years, index=years.index(year_default), key="general_year")
-            months_avail = sorted([int(m) for m in valid_dates[valid_dates.dt.year == sel_custom_year].dt.month.unique().tolist()])
-            month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-            month_options = [f"{m:02d} - {month_names[m-1]}" for m in months_avail]
-            default_month = int(data_ref_dt.month) if int(data_ref_dt.month) in months_avail else months_avail[-1]
-            sel_custom_month = st.selectbox("Mês", options=month_options, index=months_avail.index(default_month), key="general_month")
+        period_option, start_date, end_date = render_period_filter(valid_dates, "general")
 
         with st.expander("Filtros avançados", expanded=False):
             sel_modalidade = st.multiselect("Modalidade", options=_general_options(dfs, "Modalidade"), key="general_modalidade")
@@ -1099,8 +1172,8 @@ def render_general_dashboard() -> None:
 
     filters = {
         "period_option": period_option,
-        "sel_custom_year": sel_custom_year,
-        "sel_custom_month": sel_custom_month,
+        "start_date": start_date,
+        "end_date": end_date,
         "sel_modalidade": sel_modalidade,
         "sel_uf": sel_uf,
         "sel_cidade": sel_cidade,
@@ -1109,7 +1182,7 @@ def render_general_dashboard() -> None:
         "sel_consultor": sel_consultor,
     }
 
-    for module_key in ["INSTALAÇÕES", "VISITAS TÉCNICAS"]:
+    for module_key in ["INSTALAÇÕES", "ATENDIMENTOS TÉCNICOS"]:
         cfg = MODULES[module_key]
         item_label = str(cfg["item_label"])
         st.subheader(item_label)
@@ -1119,10 +1192,10 @@ def render_general_dashboard() -> None:
             st.warning(f"Nenhum registro de {item_label.lower()} encontrado para os filtros selecionados.")
         else:
             render_highlight_cards(df_raw, cfg)
-            st.subheader("Tempo Médio por Modalidade")
+            st.subheader("Modalidades")
             render_average_time_by_modality(df_raw, item_label)
 
-        if module_key != "VISITAS TÉCNICAS":
+        if module_key != "ATENDIMENTOS TÉCNICOS":
             st.divider()
 
 
@@ -1142,8 +1215,6 @@ def render_dashboard(module_key: str) -> None:
     df.columns = df.columns.str.strip()
     df["_data"] = to_date_series(df["Data"]) if safe_col(df, "Data") else pd.NaT
     has_valid_dates = df["_data"].notna().any()
-    today_date = pd.Timestamp.today().date()
-    data_ref_dt = df["_data"].dropna().max() if has_valid_dates else pd.Timestamp.today()
 
     value_col = cfg["value_col"]
     status_col = first_existing_col(df, cfg["status_col_candidates"])
@@ -1153,20 +1224,10 @@ def render_dashboard(module_key: str) -> None:
 
     with st.sidebar:
         st.header("Filtros")
-        period_option = st.radio("Período", ["Este mês", "Este ano", "Personalizado"], index=0)
-
-        sel_custom_year = None
-        sel_custom_month = None
-        if period_option == "Personalizado" and has_valid_dates:
-            _dates_all = df["_data"].dropna()
-            years = sorted(_dates_all.dt.year.unique().tolist())
-            year_default = int(data_ref_dt.year) if int(data_ref_dt.year) in years else years[-1]
-            sel_custom_year = st.selectbox("Ano", options=years, index=years.index(year_default))
-            months_avail = sorted([int(m) for m in _dates_all[_dates_all.dt.year == sel_custom_year].dt.month.unique().tolist()])
-            month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-            month_options = [f"{m:02d} - {month_names[m-1]}" for m in months_avail]
-            default_month = int(data_ref_dt.month) if int(data_ref_dt.month) in months_avail else months_avail[-1]
-            sel_custom_month = st.selectbox("Mês", options=month_options, index=months_avail.index(default_month))
+        period_option, start_date, end_date = render_period_filter(
+            df["_data"].dropna(),
+            str(cfg["kind"]),
+        )
 
         with st.expander("Filtros avançados", expanded=False):
             def multiselect_filter(label: str, col: str) -> list[str]:
@@ -1200,18 +1261,7 @@ def render_dashboard(module_key: str) -> None:
                 default=[c for c in df.columns if not c.startswith("_")],
             )
 
-    df_f = df.copy()
-    if has_valid_dates:
-        if period_option == "Este mês":
-            y, m = int(today_date.year), int(today_date.month)
-            df_f = df_f[(df_f["_data"].dt.year == y) & (df_f["_data"].dt.month == m)]
-        elif period_option == "Este ano":
-            y = int(today_date.year)
-            df_f = df_f[df_f["_data"].dt.year == y]
-        else:
-            if sel_custom_year is not None and sel_custom_month is not None:
-                m = int(str(sel_custom_month).split("-")[0].strip())
-                df_f = df_f[(df_f["_data"].dt.year == int(sel_custom_year)) & (df_f["_data"].dt.month == int(m))]
+    df_f = apply_period_filter(df, "_data", period_option, start_date, end_date)
 
     df_f = apply_multiselect(df_f, "Modalidade", sel_modalidade)
     df_f = apply_multiselect(df_f, "UF", sel_uf)
@@ -1246,7 +1296,7 @@ def render_dashboard(module_key: str) -> None:
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        kpi_card(f"{item_label} Concluídas", str(concluidas), COR1)
+        kpi_card(str(cfg["completed_label"]), str(concluidas), COR1)
     with k2:
         kpi_card("Tempo Médio", tempo_medio_str, COR1)
     with k3:
@@ -1309,7 +1359,7 @@ def render_dashboard(module_key: str) -> None:
         else:
             st.info("Coluna 'Modalidade' não encontrada.")
     with g2:
-        st.subheader(f"Status das {item_label}")
+        st.subheader(f"Status — {item_label}")
         if status_col:
             s_bucket = df_f[status_col].dropna().astype(str).str.strip()
             if s_bucket.empty:
@@ -1351,7 +1401,7 @@ def render_dashboard(module_key: str) -> None:
         else:
             st.info("Coluna de Técnico não encontrada.")
     with c_right:
-        st.subheader(f"Horário das {item_label}")
+        st.subheader(f"Horário {cfg['plural_article']} {item_label}")
         if safe_col(df_f, "Início"):
             histogram_by_hour(df_f["Início"], y_label=chart_y)
         else:
@@ -1430,11 +1480,216 @@ def render_dashboard(module_key: str) -> None:
 
 
 # =============================
+# Dashboard Tiflux
+# =============================
+def render_tiflux_dashboard() -> None:
+    st.title("TIFLUX")
+
+    df_raw = read_sheet(SPREADSHEET_ID, TIFLUX_CHAT_SHEET)
+    if df_raw.empty:
+        st.warning("A aba Tiflux_Chat não retornou dados.")
+        return
+
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
+    if safe_col(df, "Iniciado em"):
+        df["_iniciado_em"] = to_datetime_series(df["Iniciado em"])
+    else:
+        df["_iniciado_em"] = pd.NaT
+    df["_duracao_min"] = df["Duração"].map(_parse_duration_to_minutes) if safe_col(df, "Duração") else None
+    df["_espera_min"] = df["Tempo de espera"].map(_parse_duration_to_minutes) if safe_col(df, "Tempo de espera") else None
+    df["_avaliacao"] = pd.to_numeric(df["Avaliação"], errors="coerce") if safe_col(df, "Avaliação") else None
+
+    def filter_options(column: str) -> list[str]:
+        if not safe_col(df, column):
+            return []
+        values = df[column].dropna().astype(str).str.strip()
+        return sorted(values[values != ""].unique().tolist())
+
+    with st.sidebar:
+        st.header("Filtros")
+        period_option, start_date, end_date = render_period_filter(df["_iniciado_em"].dropna(), "tiflux")
+        with st.expander("Filtros avançados", expanded=False):
+            sel_origem = st.multiselect("Origem", filter_options("Origem"), key="tiflux_origem")
+            sel_responsavel = st.multiselect("Responsável", filter_options("Responsável"), key="tiflux_responsavel")
+            sel_grupo = st.multiselect("Grupo de atendente", filter_options("Grupo de atendente"), key="tiflux_grupo")
+            sel_departamento = st.multiselect("Departamento", filter_options("Departamento"), key="tiflux_departamento")
+            sel_status = st.multiselect("Status", filter_options("Status"), key="tiflux_status")
+            sel_catalogo = st.multiselect(
+                "Catálogo de serviços",
+                filter_options("Catálogo de serviços"),
+                key="tiflux_catalogo",
+            )
+            show_cols = st.multiselect(
+                "Colunas na tabela",
+                options=[c for c in df.columns if not c.startswith("_")],
+                default=[c for c in df.columns if not c.startswith("_")],
+                key="tiflux_show_cols",
+            )
+
+    df_f = apply_period_filter(df, "_iniciado_em", period_option, start_date, end_date)
+    for column, selected in [
+        ("Origem", sel_origem),
+        ("Responsável", sel_responsavel),
+        ("Grupo de atendente", sel_grupo),
+        ("Departamento", sel_departamento),
+        ("Status", sel_status),
+        ("Catálogo de serviços", sel_catalogo),
+    ]:
+        df_f = apply_multiselect(df_f, column, selected)
+
+    if df_f.empty:
+        st.warning("Nenhum atendimento do Tiflux foi encontrado para os filtros selecionados.")
+        return
+
+    total = len(df_f)
+    fechados = int(df_f["Status"].map(lambda value: normalize_status(value).startswith("fechad")).sum()) if safe_col(df_f, "Status") else 0
+    taxa_fechamento = (fechados / total) if total else None
+    duracao_media = df_f["_duracao_min"].dropna().mean()
+    espera_media = df_f["_espera_min"].dropna().mean()
+    avaliacoes = df_f["_avaliacao"].dropna()
+    avaliacao_media = avaliacoes.mean() if not avaliacoes.empty else None
+
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        kpi_card("Atendimentos", format_number_pt(float(total), 0), COR1)
+    with k2:
+        kpi_card("Atendimentos Fechados", format_number_pt(float(fechados), 0), COR1)
+    with k3:
+        kpi_card(
+            "Taxa de Fechamento",
+            f"{taxa_fechamento * 100:.1f}%" if taxa_fechamento is not None else "—",
+            COR1,
+        )
+
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+    k4, k5, k6 = st.columns(3)
+    with k4:
+        kpi_card("Tempo Médio de Atendimento", format_minutes_pt(duracao_media), COR1)
+    with k5:
+        kpi_card("Tempo Médio de Espera", format_minutes_pt(espera_media), COR1)
+    with k6:
+        rating_label = f"Avaliação Média ({len(avaliacoes)} respostas)"
+        rating_value = f"{format_number_pt(float(avaliacao_media), 1)}/5" if avaliacao_media is not None else "—"
+        kpi_card(rating_label, rating_value, COR1)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+    st.subheader("Atendimentos por dia")
+    if df_f["_iniciado_em"].notna().any():
+        line_chart_by_day(df_f["_iniciado_em"], "Atendimentos")
+    else:
+        st.info("Sem datas válidas para a série temporal.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Atendimentos por Responsável")
+        if safe_col(df_f, "Responsável"):
+            bar_chart_counts(df_f["Responsável"], top_n=20, y_label="Atendimentos")
+        else:
+            st.info("Coluna 'Responsável' não encontrada.")
+    with g2:
+        st.subheader("Atendimentos por Origem")
+        if safe_col(df_f, "Origem"):
+            bar_chart_counts(df_f["Origem"], top_n=20, y_label="Atendimentos")
+        else:
+            st.info("Coluna 'Origem' não encontrada.")
+
+    g3, g4 = st.columns(2)
+    with g3:
+        st.subheader("Status dos Atendimentos")
+        if safe_col(df_f, "Status"):
+            bar_chart_counts(df_f["Status"], top_n=20, y_label="Atendimentos")
+        else:
+            st.info("Coluna 'Status' não encontrada.")
+    with g4:
+        st.subheader("Atendimentos por Departamento")
+        if safe_col(df_f, "Departamento"):
+            bar_chart_counts(df_f["Departamento"], top_n=20, y_label="Atendimentos")
+        else:
+            st.info("Coluna 'Departamento' não encontrada.")
+
+    g5, g6 = st.columns(2)
+    with g5:
+        st.subheader("Tempo Médio por Responsável")
+        if safe_col(df_f, "Responsável"):
+            time_by_owner = df_f.copy()
+            time_by_owner["Responsável"] = time_by_owner["Responsável"].fillna("").astype(str).str.strip()
+            time_by_owner = time_by_owner[(time_by_owner["Responsável"] != "") & time_by_owner["_duracao_min"].notna()]
+            if time_by_owner.empty:
+                st.info("Sem durações válidas por responsável.")
+            else:
+                time_by_owner = (
+                    time_by_owner.groupby("Responsável", dropna=False)["_duracao_min"]
+                    .mean()
+                    .sort_values(ascending=False)
+                    .reset_index(name="Minutos")
+                )
+                time_by_owner["Tempo médio"] = time_by_owner["Minutos"].map(format_minutes_pt)
+                fig = px.bar(
+                    time_by_owner,
+                    x="Responsável",
+                    y="Minutos",
+                    text="Tempo médio",
+                    template="plotly_dark",
+                    color_discrete_sequence=[COR1],
+                )
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=70), xaxis_title="", yaxis_title="Minutos")
+                fig.update_xaxes(tickangle=-30)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Coluna 'Responsável' não encontrada.")
+    with g6:
+        st.subheader("Distribuição das Avaliações")
+        if avaliacoes.empty:
+            st.info("Sem avaliações no período selecionado.")
+        else:
+            rating_counts = avaliacoes.value_counts().sort_index().reset_index()
+            rating_counts.columns = ["Avaliação", "Respostas"]
+            rating_counts["Avaliação"] = rating_counts["Avaliação"].map(lambda value: f"{format_number_pt(float(value), 0)}/5")
+            fig = px.bar(
+                rating_counts,
+                x="Avaliação",
+                y="Respostas",
+                text="Respostas",
+                template="plotly_dark",
+                color_discrete_sequence=[COR1],
+            )
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=40), xaxis_title="", yaxis_title="Respostas")
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Itens do Catálogo")
+    if safe_col(df_f, "Item do Catálogo"):
+        catalog_items = df_f["Item do Catálogo"].dropna().astype(str).str.strip()
+        catalog_items = catalog_items[catalog_items != ""]
+        if catalog_items.empty:
+            st.info("Sem itens de catálogo preenchidos no período selecionado.")
+        else:
+            bar_chart_counts(catalog_items, top_n=15, y_label="Atendimentos")
+    else:
+        st.info("Coluna 'Item do Catálogo' não encontrada.")
+
+    st.subheader("Tabela (filtrada)")
+    df_show = df_f[[c for c in df_f.columns if not c.startswith("_")]].copy()
+    if show_cols:
+        cols_ok = [c for c in show_cols if c in df_show.columns]
+        if cols_ok:
+            df_show = df_show[cols_ok]
+    st.dataframe(df_show, use_container_width=True, height=520)
+    download_csv(df_show, filename="relatorio_tiflux_chat_filtrado.csv")
+
+
+# =============================
 # Render final
 # =============================
 mode = st.session_state.view_mode
 if mode == "GERAL":
     render_general_dashboard()
+elif mode == "TIFLUX":
+    render_tiflux_dashboard()
 elif mode == "CADASTRAR":
     render_register_page()
 elif mode in MODULES:
