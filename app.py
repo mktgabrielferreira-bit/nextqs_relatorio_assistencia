@@ -1041,19 +1041,18 @@ def render_highlight_cards(df_raw: pd.DataFrame, cfg: dict[str, object]) -> None
     item_label = str(metrics["item_label"])
     completed_label = str(metrics["completed_label"])
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3 = st.columns(3)
     with k1:
         kpi_card(completed_label, str(metrics["concluidas"]), COR1)
     with k2:
         kpi_card("Tempo Médio", str(metrics["tempo_medio"]), COR1)
     with k3:
         kpi_card("Modalidade mais comum", str(metrics["modalidade_mais_comum"]), COR1)
-    with k4:
-        kpi_card("Taxa de Reagendamentos", str(metrics["taxa_reag"]), str(metrics["taxa_reag_color"]))
-
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    k5, k6 = st.columns(2)
+    k4, k5, k6 = st.columns(3)
+    with k4:
+        kpi_card("Taxa de Reagendamentos", str(metrics["taxa_reag"]), str(metrics["taxa_reag_color"]))
     with k5:
         horas_totais = float(metrics["horas_totais"])
         kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", COR1)
@@ -1307,16 +1306,13 @@ def render_dashboard(module_key: str) -> None:
     taxa_reag = f"{reag_rate*100:.1f}%" if reag_rate is not None else "—"
     taxa_reag_color = COR2 if (reag_rate is not None and reag_rate >= 0.26) else COR1
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3 = st.columns(3)
     with k1:
         kpi_card(str(cfg["completed_label"]), str(concluidas), COR1)
     with k2:
         kpi_card("Tempo Médio", tempo_medio_str, COR1)
     with k3:
         kpi_card("Modalidade mais comum", modalidade_mais_comum, COR1)
-    with k4:
-        kpi_card("Taxa de Reagendamentos", taxa_reag, taxa_reag_color)
-
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
     total_minutes_sum = float(mins.sum()) if not mins.empty else 0.0
@@ -1330,7 +1326,9 @@ def render_dashboard(module_key: str) -> None:
         if not tmpc.empty:
             cliente_mais = tmpc.value_counts().index[0]
 
-    k5, k6 = st.columns(2)
+    k4, k5, k6 = st.columns(3)
+    with k4:
+        kpi_card("Taxa de Reagendamentos", taxa_reag, taxa_reag_color)
     with k5:
         kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", COR1)
     with k6:
