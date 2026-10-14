@@ -556,8 +556,8 @@ def sim_nao_to_bool_text(value: str) -> str:
 # =============================
 # Configs dos módulos
 # =============================
-INSTALLATIONS_SHEET = "Instalacoes_2026"
-TECH_VISITS_SHEET = "Atendimentos_Tecnicos_2026"
+INSTALLATIONS_SHEET = "instalacoes"
+TECH_VISITS_SHEET = "atendimentos"
 
 MODULES = {
     "INSTALAÇÕES": {
