@@ -196,33 +196,11 @@ def to_datetime_series(s: pd.Series) -> pd.Series:
     return parsed
 
 
-def parse_brl_money(value) -> Optional[float]:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, (int, float)) and not pd.isna(value):
-        return float(value)
-    s = str(value).strip()
-    if not s or s.lower() in {"nan", "none"}:
-        return None
-    s = s.replace("\u00A0", " ").replace(" ", "")
-    s = s.replace("R$", "").replace("r$", "")
-    s = s.replace(".", "").replace(",", ".")
-    v = pd.to_numeric(s, errors="coerce")
-    return None if pd.isna(v) else float(v)
-
-
 def format_number_pt(value: Optional[float], decimals: int = 1) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "—"
     s = f"{float(value):,.{decimals}f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def format_currency_brl(value: Optional[float]) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "—"
-    s = f"{float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"R$ {s}"
 
 
 def _parse_duration_to_minutes(value) -> Optional[float]:
@@ -735,12 +713,10 @@ def render_installation_form(show_title: bool = True) -> None:
 
     st.divider()
 
-    c7, c8, c9 = st.columns(3)
+    c7, c8 = st.columns(2)
     with c7:
         plano = st.selectbox("Plano", ["", "TB", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "Locação"], index=0)
     with c8:
-        valor_txt = st.text_input("Valor da instalação", placeholder="500,00")
-    with c9:
         motivo_reag = st.selectbox("Motivo reagendamento", ["", "Finalizar treinamento", "Finalizar instalação", "Infraestrutura", "Stick", "Totem", "Cancelamento"], index=0)
 
     observacao_txt = st.text_area("Observação")
@@ -763,9 +739,6 @@ def render_installation_form(show_title: bool = True) -> None:
         uf_clean = (uf_txt or "").strip().upper()
         if not re.fullmatch(r"[A-Z]{2}", uf_clean):
             errors.append("UF inválida (use 2 letras, ex.: SP).")
-        if valor_txt.strip() and parse_brl_money(valor_txt) is None:
-            errors.append("Valor da instalação inválido.")
-
         duracao_calc = None
         if not errors:
             try:
@@ -800,7 +773,6 @@ def render_installation_form(show_title: bool = True) -> None:
             "CV": cv_txt.strip(),
             "Plano": plano,
             "CV Instalação": cv_inst_txt.strip(),
-            "Valor da instalação": valor_txt.strip(),
             "Motivo reagendamento": motivo_reag.strip(),
             "Observação": observacao_txt.strip(),
             "Duração": duracao_calc or "",
@@ -913,7 +885,6 @@ def render_visit_form(show_title: bool = True) -> None:
         sistema = st.selectbox("Sistema", sistema_options)
         contratual = st.selectbox("Contratual", contratual_options)
     with c6:
-        valor_txt = st.text_input("Valor Cobrado", placeholder="0,00")
         status = st.selectbox("Status", status_options)
         motivo = st.text_input("Motivo do Atendimento")
 
@@ -932,9 +903,6 @@ def render_visit_form(show_title: bool = True) -> None:
         uf_clean = (uf_txt or "").strip().upper()
         if uf_clean and not re.fullmatch(r"[A-Z]{2}", uf_clean):
             errors.append("UF inválida (use 2 letras, ex.: SP).")
-        if valor_txt.strip() and parse_brl_money(valor_txt) is None:
-            errors.append("Valor Cobrado inválido.")
-
         duracao_calc = None
         if not errors:
             try:
@@ -963,7 +931,6 @@ def render_visit_form(show_title: bool = True) -> None:
             "Tipo de treinamento": tipo_treinamento,
             "Sistema": sistema,
             "Contratual": contratual,
-            "Valor Cobrado": valor_txt.strip(),
             "Status": status,
             "Motivo do Atendimento": motivo.strip(),
             "Motivo Reagendamento": motivo_reagendamento.strip(),
