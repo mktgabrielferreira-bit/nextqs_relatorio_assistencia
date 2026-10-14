@@ -564,7 +564,6 @@ MODULES = {
         "item_singular": "Instalação",
         "completed_label": "Instalações Concluídas",
         "plural_article": "das",
-        "value_col": "Valor da instalação",
         "status_col_candidates": ["Status", "Status da Instalação", "Status Instalação", "Situacao", "Situação"],
         "reason_col_candidates": [
             "Motivo reagendamento",
@@ -583,7 +582,6 @@ MODULES = {
         "item_singular": "Atendimento Técnico",
         "completed_label": "Atendimentos Técnicos Concluídos",
         "plural_article": "dos",
-        "value_col": "Valor Cobrado",
         "status_col_candidates": ["Status"],
         "reason_col_candidates": ["Motivo do Atendimento", "Motivo Reagendamento", "Motivo"],
         "extra_filter_candidates": [
@@ -1003,7 +1001,6 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
     df.columns = df.columns.str.strip()
 
     status_col = first_existing_col(df, cfg["status_col_candidates"])
-    value_col = str(cfg["value_col"])
     item_label = str(cfg["item_label"])
     completed_label = str(cfg["completed_label"])
 
@@ -1015,11 +1012,8 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
     taxa_reag = f"{reag_rate*100:.1f}%" if reag_rate is not None else "—"
     taxa_reag_color = COR2 if (reag_rate is not None and reag_rate >= 0.26) else COR1
 
-    valores = df[value_col].map(parse_brl_money).dropna() if safe_col(df, value_col) else pd.Series(dtype=float)
-    faturamento_total = float(valores.sum()) if not valores.empty else 0.0
     total_minutes_sum = float(mins.sum()) if not mins.empty else 0.0
     horas_totais = total_minutes_sum / 60.0 if total_minutes_sum else 0.0
-    valor_por_hora = (faturamento_total / horas_totais) if horas_totais > 0 else None
 
     cliente_mais = "—"
     if safe_col(df, "Cliente"):
@@ -1037,9 +1031,7 @@ def _module_metrics(df_raw: pd.DataFrame, cfg: dict[str, object]) -> dict[str, o
         "modalidade_mais_comum": modalidade_mais_comum,
         "taxa_reag": taxa_reag,
         "taxa_reag_color": taxa_reag_color,
-        "faturamento_total": faturamento_total,
         "horas_totais": horas_totais,
-        "valor_por_hora": valor_por_hora,
         "cliente_mais": cliente_mais,
     }
 
@@ -1061,16 +1053,11 @@ def render_highlight_cards(df_raw: pd.DataFrame, cfg: dict[str, object]) -> None
 
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    k5, k6, k7, k8 = st.columns(4)
+    k5, k6 = st.columns(2)
     with k5:
-        kpi_card("Faturamento Total", format_currency_brl(float(metrics["faturamento_total"])), COR1)
-    with k6:
         horas_totais = float(metrics["horas_totais"])
         kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", COR1)
-    with k7:
-        valor_por_hora = metrics["valor_por_hora"]
-        kpi_card("Valor por Hora", format_currency_brl(float(valor_por_hora)) if valor_por_hora is not None else "—", COR1)
-    with k8:
+    with k6:
         kpi_card(f"Cliente com mais {item_label.lower()}", str(metrics["cliente_mais"]), COR1)
 
 
@@ -1243,7 +1230,6 @@ def render_dashboard(module_key: str) -> None:
     df["_data"] = to_date_series(df["Data"]) if safe_col(df, "Data") else pd.NaT
     has_valid_dates = df["_data"].notna().any()
 
-    value_col = cfg["value_col"]
     status_col = first_existing_col(df, cfg["status_col_candidates"])
     reason_col = first_existing_col(df, cfg["reason_col_candidates"])
     tecnico_col = first_existing_col(df, ["Técnico", "Tecnico", "Técnicos", "Tecnicos"])
@@ -1333,11 +1319,8 @@ def render_dashboard(module_key: str) -> None:
 
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    valores = df_f[value_col].map(parse_brl_money).dropna() if safe_col(df_f, value_col) else pd.Series(dtype=float)
-    faturamento_total = float(valores.sum()) if not valores.empty else 0.0
     total_minutes_sum = float(mins.sum()) if not mins.empty else 0.0
     horas_totais = total_minutes_sum / 60.0 if total_minutes_sum else 0.0
-    valor_por_hora = (faturamento_total / horas_totais) if horas_totais > 0 else None
 
     cliente_mais = "—"
     if safe_col(df_f, "Cliente"):
@@ -1347,14 +1330,10 @@ def render_dashboard(module_key: str) -> None:
         if not tmpc.empty:
             cliente_mais = tmpc.value_counts().index[0]
 
-    k5, k6, k7, k8 = st.columns(4)
+    k5, k6 = st.columns(2)
     with k5:
-        kpi_card("Faturamento Total", format_currency_brl(faturamento_total), COR1)
-    with k6:
         kpi_card("Horas Totais", f"{format_number_pt(horas_totais, 1)} h" if horas_totais else "0,0 h", COR1)
-    with k7:
-        kpi_card("Valor por Hora", format_currency_brl(valor_por_hora) if valor_por_hora is not None else "—", COR1)
-    with k8:
+    with k6:
         kpi_card(f"Cliente com mais {item_label.lower()}", cliente_mais, COR1)
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
