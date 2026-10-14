@@ -10,6 +10,17 @@ import plotly.express as px
 import streamlit as st
 from google.oauth2.service_account import Credentials
 
+from tiflux import (
+    CHAT_DATE_COLUMNS,
+    CHAT_NUMERIC_COLUMNS,
+    TICKET_DATE_COLUMNS,
+    TICKET_NUMERIC_COLUMNS,
+    TIFLUX_CHAT_SHEET,
+    TIFLUX_TICKET_SHEET,
+    load_and_validate_tiflux_xlsx,
+    upsert_tiflux_frames,
+)
+
 
 # =============================
 # Paleta / Config
@@ -83,7 +94,12 @@ def _get_gspread_client(scopes: list[str]):
     return gspread.authorize(creds)
 
 
-def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
+def read_sheet(
+    spreadsheet_id: str,
+    sheet_name: Optional[str],
+    *,
+    fallback_to_first: bool = True,
+) -> pd.DataFrame:
     creds = Credentials.from_service_account_info(
         st.secrets["google_service_account"],
         scopes=SCOPES_READONLY,
@@ -93,7 +109,9 @@ def read_sheet(spreadsheet_id: str, sheet_name: Optional[str]) -> pd.DataFrame:
 
     try:
         ws = sh.worksheet(sheet_name) if sheet_name else sh.sheet1
-    except Exception:
+    except gspread.WorksheetNotFound:
+        if not fallback_to_first:
+            return pd.DataFrame()
         ws = sh.sheet1
 
     values = ws.get_all_values()
@@ -420,10 +438,18 @@ def apply_multiselect(df_in: pd.DataFrame, col: str, selected: list[str]) -> pd.
     return df_in[df_in[col].astype(str).isin(selected)]
 
 
-def render_period_filter(valid_dates: pd.Series, key_prefix: str) -> tuple[str, object, object]:
+def render_period_filter(
+    valid_dates: pd.Series,
+    key_prefix: str,
+    *,
+    include_all: bool = False,
+) -> tuple[str, object, object]:
+    period_options = ["Este mês", "Este ano", "Personalizado"]
+    if include_all:
+        period_options.insert(0, "Todo o período")
     period_option = st.radio(
         "Período",
-        ["Este mês", "Este ano", "Personalizado"],
+        period_options,
         index=0,
         key=f"{key_prefix}_period",
     )
@@ -532,7 +558,6 @@ def sim_nao_to_bool_text(value: str) -> str:
 # =============================
 INSTALLATIONS_SHEET = "Instalacoes_2026"
 TECH_VISITS_SHEET = "Atendimentos_Tecnicos_2026"
-TIFLUX_CHAT_SHEET = "Tiflux_Chat"
 
 MODULES = {
     "INSTALAÇÕES": {
@@ -1453,204 +1478,823 @@ def render_dashboard(module_key: str) -> None:
 # =============================
 # Dashboard Tiflux
 # =============================
-def render_tiflux_dashboard() -> None:
-    st.title("TIFLUX")
-
-    df_raw = read_sheet(SPREADSHEET_ID, TIFLUX_CHAT_SHEET)
-    if df_raw.empty:
-        st.warning("A aba Tiflux_Chat não retornou dados.")
-        return
-
+def _prepare_tiflux_frame(
+    df_raw: pd.DataFrame,
+    date_columns: list[str],
+    numeric_columns: list[str],
+) -> pd.DataFrame:
     df = df_raw.copy()
     df.columns = df.columns.str.strip()
-    if safe_col(df, "Iniciado em"):
-        df["_iniciado_em"] = to_datetime_series(df["Iniciado em"])
-    else:
-        df["_iniciado_em"] = pd.NaT
-    df["_duracao_min"] = df["Duração"].map(_parse_duration_to_minutes) if safe_col(df, "Duração") else None
-    df["_espera_min"] = df["Tempo de espera"].map(_parse_duration_to_minutes) if safe_col(df, "Tempo de espera") else None
-    df["_avaliacao"] = pd.to_numeric(df["Avaliação"], errors="coerce") if safe_col(df, "Avaliação") else None
+    for column in df.columns:
+        if df[column].dtype == object:
+            values = df[column].astype("string").str.strip()
+            missing = values.eq("") | values.str.upper().eq("NA")
+            df[column] = values.mask(missing, pd.NA)
+    for column in date_columns:
+        if column in df.columns:
+            df[column] = to_datetime_series(df[column])
+    for column in numeric_columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    for column in ["status", "sla_atendimento", "sla_solucao", "categoria_fonte"]:
+        if column in df.columns:
+            df[column] = df[column].astype("string").str.strip().str.upper()
+    return df
 
-    def filter_options(column: str) -> list[str]:
-        if not safe_col(df, column):
-            return []
-        values = df[column].dropna().astype(str).str.strip()
-        return sorted(values[values != ""].unique().tolist())
 
-    with st.sidebar:
-        st.header("Filtros")
-        period_option, start_date, end_date = render_period_filter(df["_iniciado_em"].dropna(), "tiflux")
-        with st.expander("Filtros avançados", expanded=False):
-            sel_origem = st.multiselect("Origem", filter_options("Origem"), key="tiflux_origem")
-            sel_responsavel = st.multiselect("Responsável", filter_options("Responsável"), key="tiflux_responsavel")
-            sel_grupo = st.multiselect("Grupo de atendente", filter_options("Grupo de atendente"), key="tiflux_grupo")
-            sel_departamento = st.multiselect("Departamento", filter_options("Departamento"), key="tiflux_departamento")
-            sel_status = st.multiselect("Status", filter_options("Status"), key="tiflux_status")
-            sel_catalogo = st.multiselect(
-                "Catálogo de serviços",
-                filter_options("Catálogo de serviços"),
-                key="tiflux_catalogo",
-            )
-            show_cols = st.multiselect(
-                "Colunas na tabela",
-                options=[c for c in df.columns if not c.startswith("_")],
-                default=[c for c in df.columns if not c.startswith("_")],
-                key="tiflux_show_cols",
-            )
+def _tiflux_options(frames: list[pd.DataFrame], column: str) -> list[str]:
+    values: list[str] = []
+    for frame in frames:
+        if column in frame.columns:
+            series = frame[column].dropna().astype(str).str.strip()
+            values.extend(series[series != ""].tolist())
+    return sorted(set(values), key=lambda value: value.casefold())
 
-    df_f = apply_period_filter(df, "_iniciado_em", period_option, start_date, end_date)
-    for column, selected in [
-        ("Origem", sel_origem),
-        ("Responsável", sel_responsavel),
-        ("Grupo de atendente", sel_grupo),
-        ("Departamento", sel_departamento),
-        ("Status", sel_status),
-        ("Catálogo de serviços", sel_catalogo),
-    ]:
-        df_f = apply_multiselect(df_f, column, selected)
 
-    if df_f.empty:
-        st.warning("Nenhum atendimento do Tiflux foi encontrado para os filtros selecionados.")
+def _tiflux_apply_selection(
+    df: pd.DataFrame,
+    column: str,
+    selected: list[str],
+) -> pd.DataFrame:
+    if not selected or column not in df.columns:
+        return df
+    return df[df[column].astype("string").isin(selected)]
+
+
+def _tiflux_percent(part: int, total: int) -> Optional[float]:
+    return None if total <= 0 else part / total * 100.0
+
+
+def _tiflux_percent_text(value: Optional[float]) -> str:
+    return "Sem base" if value is None else f"{format_number_pt(value, 1)}%"
+
+
+def _tiflux_minutes_text(minutes: Optional[float]) -> str:
+    if minutes is None or pd.isna(minutes):
+        return "—"
+    seconds = int(round(max(0.0, float(minutes)) * 60))
+    hours, remainder = divmod(seconds, 3600)
+    mins, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if mins or hours:
+        parts.append(f"{mins}min")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def _tiflux_sla_summary(df: pd.DataFrame, column: str) -> dict[str, object]:
+    values = df[column].astype("string") if column in df.columns else pd.Series(dtype="string")
+    yes = int(values.eq("SIM").sum())
+    no = int(values.eq("NAO").sum())
+    in_progress = int(values.eq("EM_ANDAMENTO").sum())
+    denominator = yes + no
+    return {
+        "sim": yes,
+        "nao": no,
+        "em_andamento": in_progress,
+        "sem_resultado": int(values.isna().sum()),
+        "denominador": denominator,
+        "taxa": _tiflux_percent(yes, denominator),
+    }
+
+
+def _tiflux_count_chart(
+    series: pd.Series,
+    *,
+    entity_label: str,
+    top_n: int = 15,
+) -> None:
+    values = series.astype("string").str.strip().fillna("Não informado")
+    values = values.mask(values.eq(""), "Não informado")
+    counts = values.value_counts().head(top_n)
+    if counts.empty:
+        st.info("Sem dados para o gráfico.")
+        return
+    chart_data = counts.rename_axis("Categoria").reset_index(name=entity_label)
+    fig = px.bar(
+        chart_data,
+        x="Categoria",
+        y=entity_label,
+        text=entity_label,
+        template="plotly_dark",
+        color_discrete_sequence=[COR1],
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_layout(
+        height=360,
+        margin=dict(l=20, r=20, t=20, b=80),
+        xaxis_title="",
+        yaxis_title=entity_label,
+    )
+    fig.update_xaxes(tickangle=-35)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _tiflux_sla_chart(df: pd.DataFrame, group_column: str, sla_column: str) -> None:
+    if group_column not in df.columns or sla_column not in df.columns:
+        st.info("Sem dados suficientes para o gráfico de SLA.")
+        return
+    data = df[df[sla_column].isin(["SIM", "NAO"])].copy()
+    if data.empty:
+        st.info("Sem resultados concluídos de SLA para o recorte.")
+        return
+    data[group_column] = data[group_column].astype("string").str.strip().fillna("Não informado")
+    data[group_column] = data[group_column].mask(data[group_column].eq(""), "Não informado")
+    grouped = (
+        data.assign(_sim=data[sla_column].eq("SIM").astype(int))
+        .groupby(group_column, dropna=False)
+        .agg(SIM=("_sim", "sum"), Base=(sla_column, "size"))
+        .reset_index()
+    )
+    grouped["Cumprimento"] = grouped["SIM"] / grouped["Base"] * 100
+    grouped = grouped.sort_values(["Base", "Cumprimento"], ascending=[False, False]).head(15)
+    grouped["Rótulo"] = grouped["Cumprimento"].map(lambda value: f"{format_number_pt(value, 1)}%")
+    fig = px.bar(
+        grouped,
+        x=group_column,
+        y="Cumprimento",
+        text="Rótulo",
+        custom_data=["SIM", "Base"],
+        template="plotly_dark",
+        color_discrete_sequence=[COR1],
+    )
+    fig.update_traces(
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="%{x}<br>Cumprimento: %{y:.1f}%<br>SIM: %{customdata[0]}<br>Base: %{customdata[1]}<extra></extra>",
+    )
+    fig.update_layout(
+        height=380,
+        margin=dict(l=20, r=20, t=20, b=90),
+        xaxis_title="",
+        yaxis_title="Cumprimento (%)",
+    )
+    fig.update_xaxes(tickangle=-35)
+    fig.update_yaxes(range=[0, 105])
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _tiflux_flow_chart(tickets: pd.DataFrame) -> None:
+    series = []
+    for column, label in [("aberto_em", "Aberturas"), ("fechado_em", "Fechamentos")]:
+        if column not in tickets.columns:
+            continue
+        dates = tickets[column].dropna().dt.date
+        if dates.empty:
+            continue
+        counts = dates.value_counts().sort_index()
+        series.extend(
+            {"Data": day, "Movimento": label, "Tickets": int(quantity)}
+            for day, quantity in counts.items()
+        )
+    if not series:
+        st.info("Sem datas válidas para o fluxo de tickets.")
+        return
+    fig = px.line(
+        pd.DataFrame(series),
+        x="Data",
+        y="Tickets",
+        color="Movimento",
+        markers=True,
+        template="plotly_dark",
+        color_discrete_sequence=[COR1, COR2],
+    )
+    fig.update_layout(height=380, margin=dict(l=20, r=20, t=20, b=40))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _tiflux_import_panel() -> None:
+    feedback = st.session_state.pop("tiflux_import_feedback", None)
+    if feedback:
+        st.success(feedback["message"])
+        for warning in feedback.get("warnings", []):
+            st.warning(warning)
+
+    with st.expander("Importar base TIFLUX (.xlsx)", expanded=False):
+        st.caption(
+            "O arquivo deve conter as abas Tickets e Chats. Registros existentes são "
+            "atualizados por ticket_id e chat_id; IDs novos são acrescentados."
+        )
+        uploaded_file = st.file_uploader(
+            "Selecionar arquivo XLSX",
+            type=["xlsx"],
+            key="tiflux_xlsx_upload",
+        )
+        if uploaded_file is None:
+            return
+        st.caption(f"Arquivo selecionado: {uploaded_file.name}")
+        if not st.button(
+            "Importar para a planilha base",
+            type="primary",
+            use_container_width=True,
+            key="tiflux_import_button",
+        ):
+            return
+
+        try:
+            with st.spinner("Validando e importando Tickets e Chats..."):
+                imported = load_and_validate_tiflux_xlsx(uploaded_file.getvalue())
+                result = upsert_tiflux_frames(
+                    _get_gspread_client(SCOPES_READWRITE),
+                    SPREADSHEET_ID,
+                    imported.tickets,
+                    imported.chats,
+                )
+                st.cache_data.clear()
+            tickets_result = result[TIFLUX_TICKET_SHEET]
+            chats_result = result[TIFLUX_CHAT_SHEET]
+            st.session_state["tiflux_import_feedback"] = {
+                "message": (
+                    "Importação concluída. "
+                    f"Tickets: {tickets_result['inseridos']} inseridos, "
+                    f"{tickets_result['atualizados']} atualizados e "
+                    f"{tickets_result['inalterados']} inalterados. "
+                    f"Chats: {chats_result['inseridos']} inseridos, "
+                    f"{chats_result['atualizados']} atualizados e "
+                    f"{chats_result['inalterados']} inalterados."
+                ),
+                "warnings": list(imported.warnings),
+            }
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Não foi possível importar o arquivo: {exc}")
+
+
+def render_tiflux_dashboard() -> None:
+    st.title("TIFLUX")
+    _tiflux_import_panel()
+
+    try:
+        tickets_raw = read_sheet(
+            SPREADSHEET_ID,
+            TIFLUX_TICKET_SHEET,
+            fallback_to_first=False,
+        )
+        chats_raw = read_sheet(
+            SPREADSHEET_ID,
+            TIFLUX_CHAT_SHEET,
+            fallback_to_first=False,
+        )
+    except Exception as exc:
+        st.error(f"Não foi possível ler as abas TIFLUX: {exc}")
         return
 
-    total = len(df_f)
-    fechados = int(df_f["Status"].map(lambda value: normalize_status(value).startswith("fechad")).sum()) if safe_col(df_f, "Status") else 0
-    taxa_fechamento = (fechados / total) if total else None
-    duracao_media = df_f["_duracao_min"].dropna().mean()
-    espera_media = df_f["_espera_min"].dropna().mean()
-    avaliacoes = df_f["_avaliacao"].dropna()
-    avaliacao_media = avaliacoes.mean() if not avaliacoes.empty else None
-
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        kpi_card("Atendimentos", format_number_pt(float(total), 0), COR1)
-    with k2:
-        kpi_card("Atendimentos Fechados", format_number_pt(float(fechados), 0), COR1)
-    with k3:
-        kpi_card(
-            "Taxa de Fechamento",
-            f"{taxa_fechamento * 100:.1f}%" if taxa_fechamento is not None else "—",
-            COR1,
+    if tickets_raw.empty and chats_raw.empty:
+        st.warning(
+            "As abas tiflux-ticket e tiflux-chat ainda não possuem dados. "
+            "Importe um arquivo XLSX acima."
         )
+        return
 
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    tickets = _prepare_tiflux_frame(
+        tickets_raw,
+        TICKET_DATE_COLUMNS,
+        TICKET_NUMERIC_COLUMNS,
+    )
+    chats = _prepare_tiflux_frame(
+        chats_raw,
+        CHAT_DATE_COLUMNS,
+        CHAT_NUMERIC_COLUMNS,
+    )
 
-    k4, k5, k6 = st.columns(3)
-    with k4:
-        kpi_card("Tempo Médio de Atendimento", format_minutes_pt(duracao_media), COR1)
-    with k5:
-        kpi_card("Tempo Médio de Espera", format_minutes_pt(espera_media), COR1)
-    with k6:
-        rating_label = f"Avaliação Média ({len(avaliacoes)} respostas)"
-        rating_value = f"{format_number_pt(float(avaliacao_media), 1)}/5" if avaliacao_media is not None else "—"
-        kpi_card(rating_label, rating_value, COR1)
+    all_dates = pd.concat(
+        [
+            tickets.get("aberto_em", pd.Series(dtype="datetime64[ns]")),
+            chats.get("iniciado_em", pd.Series(dtype="datetime64[ns]")),
+        ],
+        ignore_index=True,
+    ).dropna()
 
-    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    with st.sidebar:
+        st.header("Filtros TIFLUX")
+        period_option, start_date, end_date = render_period_filter(
+            all_dates,
+            "tiflux",
+            include_all=True,
+        )
+        ticket_date_label = st.selectbox(
+            "Data dos tickets",
+            ["Abertura do ticket", "Fechamento do ticket"],
+            key="tiflux_ticket_date_type",
+        )
+        related_chats = st.checkbox(
+            "Somente chats dos tickets filtrados",
+            value=False,
+            key="tiflux_related_chats",
+            help="No modo normal, os chats são filtrados pela própria data de início. Neste modo, também precisam estar vinculados aos tickets selecionados.",
+        )
+        with st.expander("Filtros avançados", expanded=False):
+            frames = [tickets, chats]
+            sel_cliente = st.multiselect("Cliente", _tiflux_options(frames, "cliente"), key="tiflux_cliente")
+            sel_responsavel = st.multiselect("Técnico", _tiflux_options(frames, "responsavel"), key="tiflux_responsavel")
+            sel_catalogo = st.multiselect("Catálogo", _tiflux_options(frames, "catalogo"), key="tiflux_catalogo")
+            sel_area = st.multiselect("Área", _tiflux_options(frames, "area"), key="tiflux_area")
+            sel_item = st.multiselect("Item", _tiflux_options(frames, "item"), key="tiflux_item")
+            sel_origem = st.multiselect("Origem", _tiflux_options(frames, "origem"), key="tiflux_origem")
+            sel_departamento = st.multiselect("Departamento do chat", _tiflux_options([chats], "departamento"), key="tiflux_departamento")
+            sel_natureza = st.multiselect("Natureza do ticket", _tiflux_options([tickets], "natureza"), key="tiflux_natureza")
+            sel_causa = st.multiselect("Causa do ticket", _tiflux_options([tickets], "causa"), key="tiflux_causa")
+            sel_ticket_status = st.multiselect("Status do ticket", _tiflux_options([tickets], "status"), key="tiflux_ticket_status")
+            sel_chat_status = st.multiselect("Status do chat", _tiflux_options([chats], "status"), key="tiflux_chat_status")
+            sel_sla_atendimento = st.multiselect("SLA de atendimento", _tiflux_options([tickets], "sla_atendimento"), key="tiflux_sla_atendimento")
+            sel_sla_solucao = st.multiselect("SLA de solução", _tiflux_options([tickets], "sla_solucao"), key="tiflux_sla_solucao")
 
-    st.subheader("Atendimentos por dia")
-    if df_f["_iniciado_em"].notna().any():
-        line_chart_by_day(df_f["_iniciado_em"], "Atendimentos")
-    else:
-        st.info("Sem datas válidas para a série temporal.")
+    ticket_date_column = "aberto_em" if ticket_date_label == "Abertura do ticket" else "fechado_em"
+    tickets_f = apply_period_filter(tickets, ticket_date_column, period_option, start_date, end_date)
+    if ticket_date_column == "fechado_em":
+        tickets_f = tickets_f[
+            tickets_f["fechado_em"].notna() & tickets_f["status"].eq("FECHADO")
+        ]
+    chats_f = apply_period_filter(chats, "iniciado_em", period_option, start_date, end_date)
 
-    g1, g2 = st.columns(2)
-    with g1:
-        st.subheader("Atendimentos por Responsável")
-        if safe_col(df_f, "Responsável"):
-            bar_chart_counts(df_f["Responsável"], top_n=20, y_label="Atendimentos")
-        else:
-            st.info("Coluna 'Responsável' não encontrada.")
-    with g2:
-        st.subheader("Atendimentos por Origem")
-        if safe_col(df_f, "Origem"):
-            bar_chart_counts(df_f["Origem"], top_n=20, y_label="Atendimentos")
-        else:
-            st.info("Coluna 'Origem' não encontrada.")
+    shared_filters = [
+        ("cliente", sel_cliente),
+        ("responsavel", sel_responsavel),
+        ("catalogo", sel_catalogo),
+        ("area", sel_area),
+        ("item", sel_item),
+        ("origem", sel_origem),
+    ]
+    for column, selected in shared_filters:
+        tickets_f = _tiflux_apply_selection(tickets_f, column, selected)
+        chats_f = _tiflux_apply_selection(chats_f, column, selected)
+    for column, selected in [
+        ("natureza", sel_natureza),
+        ("causa", sel_causa),
+        ("status", sel_ticket_status),
+        ("sla_atendimento", sel_sla_atendimento),
+        ("sla_solucao", sel_sla_solucao),
+    ]:
+        tickets_f = _tiflux_apply_selection(tickets_f, column, selected)
+    chats_f = _tiflux_apply_selection(chats_f, "status", sel_chat_status)
+    chats_f = _tiflux_apply_selection(chats_f, "departamento", sel_departamento)
 
-    g3, g4 = st.columns(2)
-    with g3:
-        st.subheader("Status dos Atendimentos")
-        if safe_col(df_f, "Status"):
-            bar_chart_counts(df_f["Status"], top_n=20, y_label="Atendimentos")
-        else:
-            st.info("Coluna 'Status' não encontrada.")
-    with g4:
-        st.subheader("Atendimentos por Departamento")
-        if safe_col(df_f, "Departamento"):
-            bar_chart_counts(df_f["Departamento"], top_n=20, y_label="Atendimentos")
-        else:
-            st.info("Coluna 'Departamento' não encontrada.")
+    if related_chats:
+        selected_ticket_ids = set(tickets_f["ticket_id"].dropna().astype(str))
+        chats_f = chats_f[
+            chats_f["ticket_id"].notna()
+            & chats_f["ticket_id"].astype(str).isin(selected_ticket_ids)
+        ]
 
-    g5, g6 = st.columns(2)
-    with g5:
-        st.subheader("Tempo Médio por Responsável")
-        if safe_col(df_f, "Responsável"):
-            time_by_owner = df_f.copy()
-            time_by_owner["Responsável"] = time_by_owner["Responsável"].fillna("").astype(str).str.strip()
-            time_by_owner = time_by_owner[(time_by_owner["Responsável"] != "") & time_by_owner["_duracao_min"].notna()]
-            if time_by_owner.empty:
-                st.info("Sem durações válidas por responsável.")
-            else:
-                time_by_owner = (
-                    time_by_owner.groupby("Responsável", dropna=False)["_duracao_min"]
-                    .mean()
-                    .sort_values(ascending=False)
-                    .reset_index(name="Minutos")
-                )
-                time_by_owner["Tempo médio"] = time_by_owner["Minutos"].map(format_minutes_pt)
-                fig = px.bar(
-                    time_by_owner,
-                    x="Responsável",
-                    y="Minutos",
-                    text="Tempo médio",
-                    template="plotly_dark",
-                    color_discrete_sequence=[COR1],
-                )
-                fig.update_traces(textposition="outside", cliponaxis=False)
-                fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=70), xaxis_title="", yaxis_title="Minutos")
-                fig.update_xaxes(tickangle=-30)
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Coluna 'Responsável' não encontrada.")
-    with g6:
-        st.subheader("Distribuição das Avaliações")
-        if avaliacoes.empty:
-            st.info("Sem avaliações no período selecionado.")
-        else:
-            rating_counts = avaliacoes.value_counts().sort_index().reset_index()
-            rating_counts.columns = ["Avaliação", "Respostas"]
-            rating_counts["Avaliação"] = rating_counts["Avaliação"].map(lambda value: f"{format_number_pt(float(value), 0)}/5")
-            fig = px.bar(
-                rating_counts,
-                x="Avaliação",
-                y="Respostas",
-                text="Respostas",
-                template="plotly_dark",
-                color_discrete_sequence=[COR1],
+    total_tickets = int(tickets_f["ticket_id"].nunique()) if "ticket_id" in tickets_f else 0
+    tickets_abertos = int(tickets_f["status"].eq("ABERTO").sum()) if "status" in tickets_f else 0
+    tickets_fechados = int(tickets_f["status"].eq("FECHADO").sum()) if "status" in tickets_f else 0
+    total_chats = int(chats_f["chat_id"].nunique()) if "chat_id" in chats_f else 0
+    chats_fechados = int(chats_f["status"].eq("FECHADO").sum()) if "status" in chats_f else 0
+    chats_cancelados = int(chats_f["status"].eq("CANCELADO").sum()) if "status" in chats_f else 0
+
+    sla_atendimento = _tiflux_sla_summary(tickets_f, "sla_atendimento")
+    sla_solucao = _tiflux_sla_summary(tickets_f, "sla_solucao")
+    meta_values = tickets_f.get("meta_sla_percentual", pd.Series(dtype=float)).dropna()
+    meta_sla = float(meta_values.mode().iloc[0]) if not meta_values.empty else None
+
+    reference = tickets_f.get("referencia_em", pd.Series(pd.NaT, index=tickets_f.index))
+    atendimento_vencido = (
+        tickets_f.get("primeiro_atendimento_em", pd.Series(pd.NaT, index=tickets_f.index)).isna()
+        & tickets_f.get("vencimento_atendimento_em", pd.Series(pd.NaT, index=tickets_f.index)).notna()
+        & (tickets_f.get("vencimento_atendimento_em", pd.Series(pd.NaT, index=tickets_f.index)) < reference)
+    )
+    solucao_vencida = (
+        tickets_f.get("status", pd.Series("", index=tickets_f.index)).eq("ABERTO")
+        & tickets_f.get("vencimento_solucao_em", pd.Series(pd.NaT, index=tickets_f.index)).notna()
+        & (tickets_f.get("vencimento_solucao_em", pd.Series(pd.NaT, index=tickets_f.index)) < reference)
+    )
+    estagio_vencido = (
+        tickets_f.get("status", pd.Series("", index=tickets_f.index)).eq("ABERTO")
+        & tickets_f.get("vencimento_estagio_em", pd.Series(pd.NaT, index=tickets_f.index)).notna()
+        & (tickets_f.get("vencimento_estagio_em", pd.Series(pd.NaT, index=tickets_f.index)) < reference)
+    )
+
+    closed_attended = chats_f[
+        chats_f.get("status", pd.Series("", index=chats_f.index)).eq("FECHADO")
+        & chats_f.get("assumido_em", pd.Series(pd.NaT, index=chats_f.index)).notna()
+    ]
+    closed_unattended = chats_f[
+        chats_f.get("status", pd.Series("", index=chats_f.index)).eq("FECHADO")
+        & chats_f.get("assumido_em", pd.Series(pd.NaT, index=chats_f.index)).isna()
+    ]
+    wait_base = closed_attended[closed_attended.get("espera_util_min", pd.Series(dtype=float)).notna()]
+    wait_values = wait_base.get("espera_util_min", pd.Series(dtype=float))
+    ticket_ratings = tickets_f.get("avaliacao_nota", pd.Series(dtype=float)).dropna()
+    chat_ratings = chats_f.get("avaliacao_nota", pd.Series(dtype=float)).dropna()
+
+    overview_tab, tickets_tab, chats_tab, quality_tab, details_tab = st.tabs(
+        ["Visão geral", "Tickets", "Chats", "Avaliações e qualidade", "Detalhamento"]
+    )
+
+    with overview_tab:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            kpi_card("Tickets", format_number_pt(float(total_tickets), 0), COR1)
+        with c2:
+            kpi_card("Tickets em aberto", format_number_pt(float(tickets_abertos), 0), COR2 if tickets_abertos else COR1)
+        with c3:
+            kpi_card("Tickets fechados", format_number_pt(float(tickets_fechados), 0), COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            kpi_card("Chats", format_number_pt(float(total_chats), 0), COR1)
+        with c5:
+            kpi_card("Chats fechados", format_number_pt(float(chats_fechados), 0), COR1)
+        with c6:
+            cancel_rate = _tiflux_percent(chats_cancelados, total_chats)
+            kpi_card(
+                f"Chats cancelados ({chats_cancelados})",
+                _tiflux_percent_text(cancel_rate),
+                COR2 if chats_cancelados else COR1,
             )
-            fig.update_traces(textposition="outside", cliponaxis=False)
-            fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=40), xaxis_title="", yaxis_title="Respostas")
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        c7, c8, c9 = st.columns(3)
+        with c7:
+            rate = sla_atendimento["taxa"]
+            color = COR2 if rate is not None and meta_sla is not None and rate < meta_sla else COR1
+            kpi_card(
+                f"SLA Atendimento ({sla_atendimento['sim']}/{sla_atendimento['denominador']})",
+                _tiflux_percent_text(rate),
+                color,
+            )
+        with c8:
+            rate = sla_solucao["taxa"]
+            color = COR2 if rate is not None and meta_sla is not None and rate < meta_sla else COR1
+            kpi_card(
+                f"SLA Solução ({sla_solucao['sim']}/{sla_solucao['denominador']})",
+                _tiflux_percent_text(rate),
+                color,
+            )
+        with c9:
+            kpi_card("Meta de SLA", _tiflux_percent_text(meta_sla), COR1)
+        st.caption(
+            "As taxas de SLA usam SIM ÷ (SIM + NAO). EM_ANDAMENTO e valores ausentes ficam fora do denominador."
+        )
+        st.caption(
+            f"Atendimento: {sla_atendimento['em_andamento']} em andamento e "
+            f"{sla_atendimento['sem_resultado']} sem resultado. Solução: "
+            f"{sla_solucao['em_andamento']} em andamento e "
+            f"{sla_solucao['sem_resultado']} sem resultado."
+        )
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        c10, c11, c12 = st.columns(3)
+        with c10:
+            kpi_card("Atendimento pendente vencido", str(int(atendimento_vencido.sum())), COR2 if atendimento_vencido.any() else COR1)
+        with c11:
+            kpi_card("Solução pendente vencida", str(int(solucao_vencida.sum())), COR2 if solucao_vencida.any() else COR1)
+        with c12:
+            kpi_card("Estágio vencido", str(int(estagio_vencido.sum())), COR2 if estagio_vencido.any() else COR1)
 
-    st.subheader("Itens do Catálogo")
-    if safe_col(df_f, "Item do Catálogo"):
-        catalog_items = df_f["Item do Catálogo"].dropna().astype(str).str.strip()
-        catalog_items = catalog_items[catalog_items != ""]
-        if catalog_items.empty:
-            st.info("Sem itens de catálogo preenchidos no período selecionado.")
+        st.subheader("Entradas e fechamentos de tickets por dia")
+        _tiflux_flow_chart(tickets_f)
+        g1, g2 = st.columns(2)
+        with g1:
+            st.subheader("Tickets por cliente")
+            _tiflux_count_chart(tickets_f.get("cliente", pd.Series(dtype="string")), entity_label="Tickets")
+        with g2:
+            st.subheader("Chats por cliente")
+            _tiflux_count_chart(chats_f.get("cliente", pd.Series(dtype="string")), entity_label="Chats")
+
+    with tickets_tab:
+        duration_base = tickets_f[
+            tickets_f.get("status", pd.Series("", index=tickets_f.index)).eq("FECHADO")
+            & tickets_f.get("duracao_util_min", pd.Series(dtype=float)).notna()
+        ].get("duracao_util_min", pd.Series(dtype=float))
+        reopened_tickets = int((tickets_f.get("reaberturas", pd.Series(0, index=tickets_f.index)).fillna(0) > 0).sum())
+        reopen_sum = int(tickets_f.get("reaberturas", pd.Series(dtype=float)).fillna(0).sum())
+        pointed_sum = tickets_f.get("tempo_apontado_min", pd.Series(dtype=float)).dropna().sum()
+        t1, t2, t3 = st.columns(3)
+        with t1:
+            kpi_card("Duração média dos fechados", _tiflux_minutes_text(duration_base.mean() if not duration_base.empty else None), COR1)
+        with t2:
+            kpi_card("Mediana da duração", _tiflux_minutes_text(duration_base.median() if not duration_base.empty else None), COR1)
+        with t3:
+            kpi_card("P90 da duração", _tiflux_minutes_text(duration_base.quantile(0.9) if not duration_base.empty else None), COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        t4, t5, t6 = st.columns(3)
+        with t4:
+            kpi_card("Tickets reabertos", str(reopened_tickets), COR2 if reopened_tickets else COR1)
+        with t5:
+            kpi_card("Soma de reaberturas", str(reopen_sum), COR2 if reopen_sum else COR1)
+        with t6:
+            kpi_card("Tempo apontado", _tiflux_minutes_text(float(pointed_sum)), COR1)
+        st.caption("Duração útil não representa esforço ativo. Tempo apontado é exibido separadamente.")
+
+        closed_ticket_base = tickets_f[tickets_f.get("status", pd.Series("", index=tickets_f.index)).eq("FECHADO")]
+        closed_attendance_sla = _tiflux_sla_summary(closed_ticket_base, "sla_atendimento")
+        closed_solution_sla = _tiflux_sla_summary(closed_ticket_base, "sla_solucao")
+        closed_sla_table = pd.DataFrame(
+            [
+                {
+                    "Indicador": "SLA de atendimento — somente fechados",
+                    "SIM": closed_attendance_sla["sim"],
+                    "NAO": closed_attendance_sla["nao"],
+                    "Base": closed_attendance_sla["denominador"],
+                    "Cumprimento": _tiflux_percent_text(closed_attendance_sla["taxa"]),
+                },
+                {
+                    "Indicador": "SLA de solução — somente fechados",
+                    "SIM": closed_solution_sla["sim"],
+                    "NAO": closed_solution_sla["nao"],
+                    "Base": closed_solution_sla["denominador"],
+                    "Cumprimento": _tiflux_percent_text(closed_solution_sla["taxa"]),
+                },
+            ]
+        )
+        st.dataframe(closed_sla_table, use_container_width=True, hide_index=True)
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.subheader("Tickets por natureza")
+            _tiflux_count_chart(tickets_f.get("natureza", pd.Series(dtype="string")), entity_label="Tickets")
+        with g2:
+            st.subheader("Tickets por causa")
+            _tiflux_count_chart(tickets_f.get("causa", pd.Series(dtype="string")), entity_label="Tickets")
+        sla_group_label = st.selectbox(
+            "Agrupar SLAs por",
+            ["Técnico", "Cliente", "Item"],
+            key="tiflux_sla_group",
+        )
+        sla_group_column = {"Técnico": "responsavel", "Cliente": "cliente", "Item": "item"}[sla_group_label]
+        g3, g4 = st.columns(2)
+        with g3:
+            st.subheader(f"SLA de atendimento por {sla_group_label.lower()}")
+            _tiflux_sla_chart(tickets_f, sla_group_column, "sla_atendimento")
+        with g4:
+            st.subheader(f"SLA de solução por {sla_group_label.lower()}")
+            _tiflux_sla_chart(tickets_f, sla_group_column, "sla_solucao")
+
+        ticket_detail_option = st.selectbox(
+            "Detalhar indicador de tickets",
+            [
+                "Todos os tickets filtrados",
+                "Tickets em aberto",
+                "SLA de atendimento não cumprido",
+                "SLA de solução não cumprido",
+                "Atendimento pendente vencido",
+                "Solução pendente vencida",
+                "Estágio vencido",
+            ],
+            key="tiflux_ticket_detail",
+        )
+        ticket_detail = tickets_f.copy()
+        if ticket_detail_option == "Tickets em aberto":
+            ticket_detail = ticket_detail[ticket_detail["status"].eq("ABERTO")]
+        elif ticket_detail_option == "SLA de atendimento não cumprido":
+            ticket_detail = ticket_detail[ticket_detail["sla_atendimento"].eq("NAO")]
+        elif ticket_detail_option == "SLA de solução não cumprido":
+            ticket_detail = ticket_detail[ticket_detail["sla_solucao"].eq("NAO")]
+        elif ticket_detail_option == "Atendimento pendente vencido":
+            ticket_detail = ticket_detail[atendimento_vencido]
+        elif ticket_detail_option == "Solução pendente vencida":
+            ticket_detail = ticket_detail[solucao_vencida]
+        elif ticket_detail_option == "Estágio vencido":
+            ticket_detail = ticket_detail[estagio_vencido]
+        ticket_detail_columns = [
+            column for column in [
+                "ticket_id", "cliente", "responsavel", "status", "aberto_em", "fechado_em",
+                "sla_atendimento", "sla_solucao", "catalogo", "area", "item", "natureza", "causa",
+            ] if column in ticket_detail.columns
+        ]
+        st.dataframe(ticket_detail[ticket_detail_columns], use_container_width=True, height=340)
+
+    with chats_tab:
+        cancel_rate = _tiflux_percent(chats_cancelados, total_chats)
+        wait_mean = wait_values.mean() if not wait_values.empty else None
+        wait_median = wait_values.median() if not wait_values.empty else None
+        wait_p90 = wait_values.quantile(0.9) if not wait_values.empty else None
+        above_10 = int((wait_values > 10).sum()) if not wait_values.empty else 0
+        above_30 = int((wait_values > 30).sum()) if not wait_values.empty else 0
+        above_60 = int((wait_values > 60).sum()) if not wait_values.empty else 0
+        cancelled_chats = chats_f[chats_f.get("status", pd.Series("", index=chats_f.index)).eq("CANCELADO")]
+        cancelled_assumed = cancelled_chats[
+            cancelled_chats.get("assumido_em", pd.Series(pd.NaT, index=cancelled_chats.index)).notna()
+        ]
+        cancelled_unassumed = cancelled_chats[
+            cancelled_chats.get("assumido_em", pd.Series(pd.NaT, index=cancelled_chats.index)).isna()
+        ]
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            kpi_card("Fechados com atendimento", str(len(closed_attended)), COR1)
+        with h2:
+            kpi_card("Fechados sem atendimento", str(len(closed_unattended)), COR2 if len(closed_unattended) else COR1)
+        with h3:
+            kpi_card(f"Cancelados ({chats_cancelados})", _tiflux_percent_text(cancel_rate), COR2 if chats_cancelados else COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        h4, h5, h6 = st.columns(3)
+        with h4:
+            kpi_card("Espera média", _tiflux_minutes_text(wait_mean), COR1)
+        with h5:
+            kpi_card("Mediana da espera", _tiflux_minutes_text(wait_median), COR1)
+        with h6:
+            kpi_card("P90 da espera", _tiflux_minutes_text(wait_p90), COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        h7, h8, h9 = st.columns(3)
+        with h7:
+            kpi_card("Espera acima de 10 min", f"{above_10} ({_tiflux_percent_text(_tiflux_percent(above_10, len(wait_values)))})", COR2 if above_10 else COR1)
+        with h8:
+            kpi_card("Espera acima de 30 min", f"{above_30} ({_tiflux_percent_text(_tiflux_percent(above_30, len(wait_values)))})", COR2 if above_30 else COR1)
+        with h9:
+            kpi_card("Espera acima de 60 min", f"{above_60} ({_tiflux_percent_text(_tiflux_percent(above_60, len(wait_values)))})", COR2 if above_60 else COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        h10, h11, h12 = st.columns(3)
+        with h10:
+            kpi_card("Cancelados após assumir", str(len(cancelled_assumed)), COR2 if len(cancelled_assumed) else COR1)
+        with h11:
+            kpi_card("Cancelados sem assumir", str(len(cancelled_unassumed)), COR2 if len(cancelled_unassumed) else COR1)
+        with h12:
+            phone_counts = chats_f.get("telefone_id", pd.Series(dtype="string")).dropna().value_counts()
+            unique_contacts = int(len(phone_counts))
+            kpi_card("Contatos únicos", str(unique_contacts), COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        h13, h14, h15 = st.columns(3)
+        with h13:
+            repeated_contacts = int((phone_counts > 1).sum())
+            kpi_card("Contatos repetidos", str(repeated_contacts), COR2 if repeated_contacts else COR1)
+        with h14:
+            duration_values = closed_attended.get("duracao_util_min", pd.Series(dtype=float)).dropna()
+            kpi_card("Duração média dos chats", _tiflux_minutes_text(duration_values.mean() if not duration_values.empty else None), COR1)
+        with h15:
+            kpi_card("Soma do tempo dos chats", _tiflux_minutes_text(duration_values.sum() if not duration_values.empty else None), COR1)
+        st.caption("As faixas de espera são análises operacionais e não representam SLAs definidos para chats.")
+        st.caption("A soma das durações não representa horas produtivas; conversas simultâneas podem se sobrepor.")
+
+        classification_original = int(chats_f.get("categoria_fonte", pd.Series(dtype="string")).eq("CHAT").sum())
+        classification_linked = int(chats_f.get("categoria_fonte", pd.Series(dtype="string")).eq("TICKET_VINCULADO").sum())
+        classification_available = int(chats_f.get("item", pd.Series(dtype="string")).notna().sum())
+        h16, h17, h18 = st.columns(3)
+        with h16:
+            kpi_card("Classificação original do chat", str(classification_original), COR1)
+        with h17:
+            kpi_card("Classificação pelo ticket vinculado", str(classification_linked), COR1)
+        with h18:
+            kpi_card("Chats com classificação disponível", str(classification_available), COR1)
+
+        st.subheader("Chats iniciados por dia")
+        line_chart_by_day(chats_f.get("iniciado_em", pd.Series(dtype="datetime64[ns]")), "Chats")
+        g1, g2 = st.columns(2)
+        with g1:
+            st.subheader("Chats por técnico")
+            _tiflux_count_chart(chats_f.get("responsavel", pd.Series(dtype="string")), entity_label="Chats")
+        with g2:
+            st.subheader("Chats por item")
+            _tiflux_count_chart(chats_f.get("item", pd.Series(dtype="string")), entity_label="Chats")
+
+        if "iniciado_em" in chats_f.columns and chats_f["iniciado_em"].notna().any():
+            time_data = chats_f[chats_f["iniciado_em"].notna()].copy()
+            weekdays = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+            time_data["Dia da semana"] = time_data["iniciado_em"].dt.dayofweek.map(dict(enumerate(weekdays)))
+            time_data["Hora"] = time_data["iniciado_em"].dt.hour
+            g3, g4 = st.columns(2)
+            with g3:
+                st.subheader("Chats por dia da semana")
+                weekday_counts = time_data["Dia da semana"].value_counts().reindex(weekdays, fill_value=0).reset_index()
+                weekday_counts.columns = ["Dia da semana", "Chats"]
+                fig = px.bar(weekday_counts, x="Dia da semana", y="Chats", text="Chats", template="plotly_dark", color_discrete_sequence=[COR1])
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=60), xaxis_title="")
+                st.plotly_chart(fig, use_container_width=True)
+            with g4:
+                st.subheader("Chats por hora de entrada")
+                hour_counts = time_data["Hora"].value_counts().sort_index().reset_index()
+                hour_counts.columns = ["Hora", "Chats"]
+                fig = px.bar(hour_counts, x="Hora", y="Chats", text="Chats", template="plotly_dark", color_discrete_sequence=[COR1])
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                fig.update_layout(height=360, margin=dict(l=20, r=20, t=20, b=40), xaxis_title="Hora")
+                fig.update_xaxes(dtick=1)
+                st.plotly_chart(fig, use_container_width=True)
+
+        chat_detail_option = st.selectbox(
+            "Detalhar indicador de chats",
+            [
+                "Todos os chats filtrados",
+                "Fechados com atendimento",
+                "Fechados sem atendimento",
+                "Cancelados",
+                "Cancelados após assumir",
+                "Cancelados sem assumir",
+                "Espera acima de 10 min",
+                "Espera acima de 30 min",
+                "Espera acima de 60 min",
+            ],
+            key="tiflux_chat_detail",
+        )
+        chat_detail = chats_f.copy()
+        if chat_detail_option == "Fechados com atendimento":
+            chat_detail = closed_attended
+        elif chat_detail_option == "Fechados sem atendimento":
+            chat_detail = closed_unattended
+        elif chat_detail_option == "Cancelados":
+            chat_detail = chat_detail[chat_detail["status"].eq("CANCELADO")]
+        elif chat_detail_option == "Cancelados após assumir":
+            chat_detail = cancelled_assumed
+        elif chat_detail_option == "Cancelados sem assumir":
+            chat_detail = cancelled_unassumed
+        elif chat_detail_option == "Espera acima de 10 min":
+            chat_detail = wait_base[wait_base["espera_util_min"] > 10]
+        elif chat_detail_option == "Espera acima de 30 min":
+            chat_detail = wait_base[wait_base["espera_util_min"] > 30]
+        elif chat_detail_option == "Espera acima de 60 min":
+            chat_detail = wait_base[wait_base["espera_util_min"] > 60]
+        chat_detail_columns = [
+            column for column in [
+                "chat_id", "ticket_id", "cliente", "responsavel", "status", "iniciado_em",
+                "assumido_em", "finalizado_em", "espera_util_min", "duracao_util_min", "catalogo", "area", "item",
+            ] if column in chat_detail.columns
+        ]
+        st.dataframe(chat_detail[chat_detail_columns], use_container_width=True, height=340)
+
+    with quality_tab:
+        ticket_rating_rate = _tiflux_percent(len(ticket_ratings), tickets_fechados)
+        chat_rating_rate = _tiflux_percent(len(chat_ratings), chats_fechados)
+        positive_chat = int(chat_ratings.isin([4, 5]).sum())
+        q1, q2, q3 = st.columns(3)
+        with q1:
+            ticket_mean = ticket_ratings.mean() if not ticket_ratings.empty else None
+            kpi_card(f"Avaliações de tickets ({len(ticket_ratings)})", f"{format_number_pt(ticket_mean, 2)}/5" if ticket_mean is not None else "Sem base", COR1)
+        with q2:
+            chat_mean = chat_ratings.mean() if not chat_ratings.empty else None
+            kpi_card(f"Avaliações de chats ({len(chat_ratings)})", f"{format_number_pt(chat_mean, 2)}/5" if chat_mean is not None else "Sem base", COR1)
+        with q3:
+            positive_rate = _tiflux_percent(positive_chat, len(chat_ratings))
+            kpi_card(f"Avaliações positivas de chat ({positive_chat}/{len(chat_ratings)})", _tiflux_percent_text(positive_rate), COR1)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        q4, q5 = st.columns(2)
+        with q4:
+            kpi_card(f"Participação nas avaliações de tickets ({len(ticket_ratings)}/{tickets_fechados})", _tiflux_percent_text(ticket_rating_rate), COR1)
+        with q5:
+            kpi_card(f"Participação nas avaliações de chats ({len(chat_ratings)}/{chats_fechados})", _tiflux_percent_text(chat_rating_rate), COR1)
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.subheader("Distribuição das notas de tickets")
+            if ticket_ratings.empty:
+                st.info("Sem avaliações de tickets no recorte.")
+            else:
+                _tiflux_count_chart(ticket_ratings, entity_label="Respostas", top_n=5)
+        with g2:
+            st.subheader("Distribuição das notas de chats")
+            if chat_ratings.empty:
+                st.info("Sem avaliações de chats no recorte.")
+            else:
+                _tiflux_count_chart(chat_ratings, entity_label="Respostas", top_n=5)
+
+        quality_rows = []
+        for entity, frame, fields in [
+            ("Tickets", tickets_f, ["responsavel", "item", "natureza", "causa"]),
+            ("Chats", chats_f, ["cliente", "responsavel", "item"]),
+        ]:
+            for field in fields:
+                if field not in frame.columns:
+                    continue
+                missing = int(frame[field].isna().sum())
+                quality_rows.append(
+                    {
+                        "Entidade": entity,
+                        "Campo": field,
+                        "Não informado": missing,
+                        "Percentual": _tiflux_percent(missing, len(frame)),
+                    }
+                )
+        st.subheader("Qualidade de preenchimento")
+        quality_df = pd.DataFrame(quality_rows)
+        if not quality_df.empty:
+            quality_df["Percentual"] = quality_df["Percentual"].map(_tiflux_percent_text)
+            st.dataframe(quality_df, use_container_width=True, hide_index=True)
+
+        low_ratings = chats_f[chats_f.get("avaliacao_nota", pd.Series(dtype=float)).isin([1, 2, 3])]
+        st.subheader("Chats com notas de 1 a 3")
+        low_rating_columns = [
+            column for column in [
+                "chat_id", "ticket_id", "cliente", "responsavel", "avaliacao_nota",
+                "avaliacao_comentario", "espera_util_min", "iniciado_em",
+            ] if column in low_ratings.columns
+        ]
+        if low_ratings.empty:
+            st.info("Nenhum chat com nota de 1 a 3 no recorte.")
         else:
-            bar_chart_counts(catalog_items, top_n=15, y_label="Atendimentos")
-    else:
-        st.info("Coluna 'Item do Catálogo' não encontrada.")
+            st.dataframe(low_ratings[low_rating_columns], use_container_width=True, height=300)
 
-    st.subheader("Tabela (filtrada)")
-    df_show = df_f[[c for c in df_f.columns if not c.startswith("_")]].copy()
-    if show_cols:
-        cols_ok = [c for c in show_cols if c in df_show.columns]
-        if cols_ok:
-            df_show = df_show[cols_ok]
-    st.dataframe(df_show, use_container_width=True, height=520)
-    download_csv(df_show, filename="relatorio_tiflux_chat_filtrado.csv")
+    with details_tab:
+        entity = st.radio("Entidade", ["Tickets", "Chats"], horizontal=True, key="tiflux_detail_entity")
+        detail_source = tickets_f if entity == "Tickets" else chats_f
+        default_columns = (
+            ["ticket_id", "cliente", "responsavel", "status", "aberto_em", "sla_atendimento", "sla_solucao", "item"]
+            if entity == "Tickets"
+            else ["chat_id", "ticket_id", "cliente", "responsavel", "status", "iniciado_em", "espera_util_min", "item"]
+        )
+        available_columns = list(detail_source.columns)
+        selected_columns = st.multiselect(
+            "Colunas da tabela",
+            options=available_columns,
+            default=[column for column in default_columns if column in available_columns],
+            key=f"tiflux_detail_columns_{entity.lower()}",
+        )
+        detail_view = detail_source[selected_columns] if selected_columns else detail_source
+        st.dataframe(detail_view, use_container_width=True, height=520)
+        download_csv(
+            detail_view,
+            filename=f"tiflux_{entity.lower()}_filtrado.csv",
+        )
 
 
 # =============================
